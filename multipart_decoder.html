@@ -1,0 +1,160 @@
+<!--
+  Copyright 2017, Bart Butenaers
+  Licensed under the Apache License, Version 2.0 (the "License");
+  you may not use this file except in compliance with the License.
+  You may obtain a copy of the License at
+  http://www.apache.org/licenses/LICENSE-2.0
+  Unless required by applicable law or agreed to in writing, software
+  distributed under the License is distributed on an "AS IS" BASIS,
+  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+  See the License for the specific language governing permissions and
+  limitations under the License.
+-->
+<script type="text/x-red" data-template-name="multipart-decoder">
+    <div class="form-row">
+        <label for="node-input-url"><i class="fa fa-globe"></i> URL</label>
+        <input id="node-input-url" type="text" placeholder="http://">
+    </div>
+    <div class="form-row">
+        <input type="checkbox" id="node-input-usetls" style="display: inline-block; width: auto; vertical-align: top;">
+        <label for="node-input-usetls" style="width: auto">Enable secure (SSL/TLS) connection</label>
+        <div id="node-row-tls" class="hide">
+            <label style="width: auto; margin-left: 20px; margin-right: 10px;" for="node-input-tls">TLS Configuration</label><input type="text" style="width: 300px" id="node-input-tls">
+        </div>
+    </div>
+    <div class="form-row">
+        <input type="checkbox" id="node-input-useAuth" style="display: inline-block; width: auto; vertical-align: top;">
+        <label for="node-input-useAuth" style="width: 70%;"> Use basic authentication</label>
+        <div style="margin-left: 20px" class="node-input-useAuth-row hide">
+            <div class="form-row">
+                <label for="node-input-user"><i class="fa fa-user"></i> Username</label>
+                <input type="text" id="node-input-user">
+            </div>
+            <div class="form-row">
+                <label for="node-input-password"><i class="fa fa-lock"></i> Password</label>
+                <input type="password" id="node-input-password">
+            </div>
+        </div>
+    </div>
+    <div class="form-row">
+        <label for="node-input-ret"><i class="fa fa-arrow-left"></i> Output</label>
+        <select type="text" id="node-input-ret" style="width:70%;">
+            <option value="txt"> a UTF-8 string</option>
+            <option value="bin"> a binary buffer</option>
+            <option value="obj"> a parsed JSON object</option>
+        </select>
+    </div>
+    <div class="form-row">
+        <label for="node-input-delay"><i class="fa fa-clock-o"></i> Delay</label>
+        <input type="text" id="node-input-delay">
+    </div>
+    <div class="form-row">
+        <label for="node-input-maximum"><i class="fa fa-hashtag"></i> Max. size</label>
+        <input type="text" id="node-input-maximum">
+    </div>    
+    <div class="form-row">
+        <label for="node-input-name"><i class="fa fa-tag"></i> Name</label>
+        <input type="text" id="node-input-name" data-i18n="[placeholder]common.label.name">
+    </div>
+    <div class="form-tips" id="tip-json" hidden>Tip: If the JSON parse fails the fetched string is returned as-is</div>
+</script>
+
+<script type="text/x-red" data-help-name="multipart-decoder">
+    <p>Provides a node for requesting and decoding multipart http streams.</p>
+    <p>The <code>URL</code> is required except when it is specified in the input message via <code>msg.url</code>:</p>
+    <p>Such URL properties can contain <a href="http://mustache.github.io/mustache.5.html" target="_blank">mustache-style</a> tags. These allow the
+    url to be constructed using values of the incoming message. For example, if the url is set to
+    <code>example.com/{{{topic}}}</code>, it will have the value of <code>msg.topic</code> automatically inserted.
+    Using {{{...}}} prevents mustache from escaping characters like / & etc.</p>
+    <p>
+    The output message contains the following properties:
+    <ul>
+        <li><code>payload</code> is the body of the response</li>
+        <li><code>statusCode</code> is the status code of the response, or the error code if the request could not be completed</li>
+        <li><code>responseUrl</code> is the url of the server that responds</li>
+        <li><code>content</code> contains the http headers of the current part</li>
+    </ul>
+    The input message can contain the following properties (apart from optional properties used for mustache expressions):
+    <ul>
+        <li><code>url</code> is required when the URL is not specified in the node.  Otherwise it will be ignored.</li>
+        <li><code>stop</code> will stop the current stream if set to 'true' (which can be used if no new stream has to be started).</li>
+        <li><code>delay</code> will be used to throttle the stream, if no delay has been specified in the node.</li>
+    </ul>
+    The <b>delay</b> is the (minimum) number of milliseconds between parts in a multipart stream, to allow throttling the stream.</p>
+    </br>
+    <p><b>Note</b>: If you need to configure a proxy please add <b>http_proxy=...</b> to your environment variables and restart Node-RED.</p>
+</script>
+
+<script type="text/javascript">
+    RED.nodes.registerType('multipart-decoder',{
+        category: 'function',
+        color:"rgb(231, 231, 174)",
+        defaults: {
+            name: {value:""},
+            ret: {value:"txt"},
+            url:{value:""},
+            tls: {type:"tls-config",required: false},
+            delay: {value:0, required: false, validate:function(value) { return !value || !isNaN(value); }},
+            maximum: {value:1000000, required: true, validate:function(value) { return !value || !isNaN(value); }},
+        },
+        credentials: {
+            user: {type:"text"},
+            password: {type: "password"}
+        },
+        inputs:1,
+        outputs:1,
+        icon: "decoder.png",
+        label: function() {
+            return this.name || "multipart decoder";
+        },
+        labelStyle: function() {
+            return this.name?"node_label_italic":"";
+        },
+        oneditprepare: function() {
+            $("#node-input-useAuth").change(function() {
+                if ($(this).is(":checked")) {
+                    $(".node-input-useAuth-row").show();
+                } else {
+                    $(".node-input-useAuth-row").hide();
+                    $('#node-input-user').val('');
+                    $('#node-input-password').val('');
+                }
+            });
+            if (this.credentials.user || this.credentials.has_password) {
+                $('#node-input-useAuth').prop('checked', true);
+            } else {
+                $('#node-input-useAuth').prop('checked', false);
+            }
+            $("#node-input-useAuth").change();
+            
+            function updateTLSOptions() {
+                if ($("#node-input-usetls").is(':checked')) {
+                    $("#node-row-tls").show();
+                } else {
+                    $("#node-row-tls").hide();
+                }
+            }
+            if (this.tls) {
+                $('#node-input-usetls').prop('checked', true);
+            } else {
+                $('#node-input-usetls').prop('checked', false);
+            }
+            updateTLSOptions();
+            $("#node-input-usetls").on("click",function() {
+                updateTLSOptions();
+            });
+            $("#node-input-ret").change(function() {
+                if ($("#node-input-ret").val() === "obj") {
+                    $("#tip-json").show();
+                } else {
+                    $("#tip-json").hide();
+                }
+            });
+        },
+        oneditsave: function() {
+            if (!$("#node-input-usetls").is(':checked')) {
+                $("#node-input-tls").val("_ADD_");
+            }
+        }
+    });
+</script>
