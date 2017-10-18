@@ -47,7 +47,7 @@ A test flow to show different streams from public IP cameras:
 [{"id":"4e26ec2f.eafc44","type":"inject","z":"57188ccd.92d204","name":"Street view full speed","topic":"","payload":"","payloadType":"date","repeat":"","crontab":"","once":false,"x":227,"y":240,"wires":[["2a8ba8db.fd6868"]]},{"id":"1b2955e4.3b40aa","type":"base64","z":"57188ccd.92d204","name":"Encode","x":860,"y":326,"wires":[["326b48d7.251718"]]},{"id":"326b48d7.251718","type":"throttle","z":"57188ccd.92d204","name":"Pass max 1/sec","throttleType":"time","timeLimit":"1","timeLimitType":"seconds","periodLimit":0,"periodLimitType":"seconds","countLimit":"10","blockSize":"1","locked":false,"resend":false,"x":1038,"y":326,"wires":[["b3eaa8e6.30f348"]]},{"id":"2a8ba8db.fd6868","type":"change","z":"57188ccd.92d204","name":"","rules":[{"t":"set","p":"url","pt":"msg","to":"http://mbewebcam.rhul.ac.uk/mjpg/video.mjpg","tot":"str"}],"action":"","property":"","from":"","to":"","reg":false,"x":448.7093048095703,"y":240.0633544921875,"wires":[["f22d1e5d.39a67"]]},{"id":"3402ee0d.95b992","type":"inject","z":"57188ccd.92d204","name":"Radio station full speed","topic":"","payload":"","payloadType":"date","repeat":"","crontab":"","once":false,"x":229.0921173095703,"y":326.5555419921875,"wires":[["16715ce1.c74263"]]},{"id":"16715ce1.c74263","type":"change","z":"57188ccd.92d204","name":"","rules":[{"t":"set","p":"url","pt":"msg","to":"http://185.49.168.74:8001/axis-cgi/mjpg/video.cgi","tot":"str"}],"action":"","property":"","from":"","to":"","reg":false,"x":450.80140686035156,"y":326.618896484375,"wires":[["f22d1e5d.39a67"]]},{"id":"14e7edce.6c4ec2","type":"comment","z":"57188ccd.92d204","name":"Camera with street view (resolution 704x576)","info":"","x":275.3382110595703,"y":203.692249417305,"wires":[]},{"id":"6e7fa5d4.14d17c","type":"comment","z":"57188ccd.92d204","name":"Camera at radio station (resolution 704x576)","info":"","x":270.0921173095703,"y":291.3055419921875,"wires":[]},{"id":"600e0de7.37b7c4","type":"inject","z":"57188ccd.92d204","name":"Pacific beach full speed","topic":"","payload":"","payloadType":"date","repeat":"","crontab":"","once":false,"x":223.3264923095703,"y":408.3055419921875,"wires":[["1e948121.0c6d5f"]]},{"id":"1e948121.0c6d5f","type":"change","z":"57188ccd.92d204","name":"","rules":[{"t":"set","p":"url","pt":"msg","to":"http://66.175.76.125/mjpg/video.mjpg","tot":"str"}],"action":"","property":"","from":"","to":"","reg":false,"x":447.03578186035156,"y":408.368896484375,"wires":[["f22d1e5d.39a67"]]},{"id":"42acbf00.09032","type":"comment","z":"57188ccd.92d204","name":"Pacific beach hotel (resolution 1280x960)","info":"","x":257.3264923095703,"y":373.0555419921875,"wires":[]},{"id":"f22d1e5d.39a67","type":"multipart-decoder","z":"57188ccd.92d204","name":"","ret":"bin","url":"","tls":"","delay":0,"maximum":"9999999999","x":673,"y":326,"wires":[["1b2955e4.3b40aa"]]},{"id":"65af8973.8fda28","type":"inject","z":"57188ccd.92d204","name":"Beach","topic":"","payload":"","payloadType":"date","repeat":"","crontab":"","once":false,"x":173.00001525878906,"y":494,"wires":[["23432d7d.a558c2"]]},{"id":"c9f2b48e.21e6b8","type":"comment","z":"57188ccd.92d204","name":"Beach (resolution 640x480)","info":"","x":207.00001525878906,"y":458.75,"wires":[]},{"id":"23432d7d.a558c2","type":"change","z":"57188ccd.92d204","name":"","rules":[{"t":"set","p":"url","pt":"msg","to":"http://200.36.58.250/mjpg/video.mjpg?resolution=640x480","tot":"str"}],"action":"","property":"","from":"","to":"","reg":false,"x":450.00001525878906,"y":493,"wires":[["f22d1e5d.39a67"]]},{"id":"b3eaa8e6.30f348","type":"ui_template","z":"57188ccd.92d204","group":"1a7f6b0.0560695","name":"Show image","order":1,"width":"6","height":"6","format":"<img width=\"16\" height=\"16\" alt=\"mjpeg test...\" src=\"data:image/jpg;base64,{{msg.payload}}\" />\n","storeOutMessages":true,"fwdInMessages":true,"templateScope":"local","x":1224,"y":326,"wires":[[]]},{"id":"1a7f6b0.0560695","type":"ui_group","z":"","name":"Performance","tab":"18b10517.00400b","disp":true,"width":"6"},{"id":"18b10517.00400b","type":"ui_tab","z":"","name":"Performance","icon":"show_chart","order":5}]
 ```
 
-Caution: this flow requires that node-red-contrib-throttle node is installed, to make sure that we don't overload the Node-Red websocket channel with too much images.
+Caution: this flow requires that [node-red-contrib-throttle](https://www.npmjs.com/package/node-red-contrib-throttle) node is installed, to make sure that we don't overload the Node-Red websocket channel with too much images.
 
 This decoder node does only support multipart streaming node.  If you need normal request/response behaviour, please use Node-Red's httprequest node.  In fact, this contribution was originally intended to be an extra [addition](https://github.com/node-red/node-red/pull/1227) of the http-request node.  As a result, some of the orginal code has been adopted here!
 
@@ -89,8 +89,41 @@ A test flow to decode a stream at full speed, or throttle the stream to slow it 
 [{"id":"ee86d795.1e8cb8","type":"inject","z":"57188ccd.92d204","name":"Street view full speed","topic":"","payload":"","payloadType":"date","repeat":"","crontab":"","once":false,"x":190,"y":260,"wires":[["db5e7dd6.6675a"]]},{"id":"db5e7dd6.6675a","type":"change","z":"57188ccd.92d204","name":"","rules":[{"t":"set","p":"url","pt":"msg","to":"http://mbewebcam.rhul.ac.uk/mjpg/video.mjpg","tot":"str"}],"action":"","property":"","from":"","to":"","reg":false,"x":615.7093048095703,"y":259.0633544921875,"wires":[["8c35709.24b749"]]},{"id":"987b33a1.c7468","type":"inject","z":"57188ccd.92d204","name":"Street view max 2/sec","topic":"","payload":"","payloadType":"date","repeat":"","crontab":"","once":false,"x":189.3264923095703,"y":353.2222900390625,"wires":[["4fb915bb.f1e59c"]]},{"id":"4fb915bb.f1e59c","type":"change","z":"57188ccd.92d204","name":"Throttle 0.5 secs","rules":[{"t":"set","p":"delay","pt":"msg","to":"500","tot":"num"}],"action":"","property":"","from":"","to":"","reg":false,"x":400.99314880371094,"y":353.22235107421875,"wires":[["db5e7dd6.6675a"]]},{"id":"835f29a7.efb048","type":"debug","z":"57188ccd.92d204","name":"Part headers (content)","active":true,"console":"false","complete":"content","x":1080,"y":260,"wires":[]},{"id":"1fd394ce.1969bb","type":"inject","z":"57188ccd.92d204","name":"Street view max 10/sec","topic":"","payload":"","payloadType":"date","repeat":"","crontab":"","once":false,"x":190.0921173095703,"y":307.3055419921875,"wires":[["14a33ef5.687651"]]},{"id":"14a33ef5.687651","type":"change","z":"57188ccd.92d204","name":"Throttle 0.1 secs","rules":[{"t":"set","p":"delay","pt":"msg","to":"100","tot":"num"}],"action":"","property":"","from":"","to":"","reg":false,"x":402.75877380371094,"y":307.30560302734375,"wires":[["db5e7dd6.6675a"]]},{"id":"8c35709.24b749","type":"multipart-decoder","z":"57188ccd.92d204","name":"","ret":"bin","url":"","tls":"","delay":0,"x":830,"y":259,"wires":[["835f29a7.efb048"]]}]
 ```
 ## Node properties
+In the node config screen, a series of properties can be setup:
 
-TODO  !!!
+### URL
+The URL should be an URL that responds with a multipart http stream (otherwise use the standard Node-Red http-request node).  This URL property is required, except when the URL is specified in the input message via `msg.url`.
+
+The URL can contain <a href="http://mustache.github.io/mustache.5.html" target="_blank">mustache-style</a> tags. Using these tags, an URL can be constructed dynamically based on values of properties in the input message.  For example, if the url is set to:
+
+```
+    www.mycamera.be/{{{topic}}}/snapshot.cgi
+```
+
+Then the value of `msg.topic` will be automatically inserted in the placeholder.  Remark: by using tripple brackets {{{...}}}, mustache will stop escaping characters like / & ...
+
+### SSL/TLS connection
+Make use of configured TLS connections (in a common TLS configuration node), where you can provide paths to your certificate files. 
+
+### Basic authentication
+Apply your username and password for http requests that require user authentication.  This data will be stored outside the flow (i.e. in a flows_xxx_cred.json file instead of the normal flows_xxx.json file).  This way these credentials will not be shared with other users when a part of the flow is being exported.
+
+Note that basic authentication can be used both for the http and https protocols.
+
+### Output (format)
+The output data in `msg.payload` can be formatted as UTF8 string, as JSON object, or as binary buffer.  Make sure to use binary buffer in case of images, i.e. when decoding an MJPEG stream.
+
+### Delay
+The delay is the (minimum) number of milliseconds between parts in a multipart stream, to allow throttling the stream.  By default the value `0` is applied, which means throttling is disabled (i.e. receiving the stream at full speed).
+
+### Maximum size
+Decoding a multipart stream, involves - among others - searching for a boundary between streams.  Suppose for some reason this boundary couldn't be found, which means the decoder would keep searching (and storing byte chunks in memory).  As a result the decoder would continue using more and more memory, until the whole system fails.  
+
+To avoid this, the maximum number of bytes (that can be received) need to be specified.  When this number is exceeded, an error will be raised and the node stops decoding.  By default the maximum number of bytes has been set to 1.000.000 bytes.  Keep in mind that this number could be unsufficient e.g. when decoding high resolution image streams. 
+
+Take into consideration that determination of this number is not exact science.  E.g. when you are retrieving images with resolution 640x480, it is not correct to set a limit of 640 * 480 = 307200 bytes.  Indeed:
++ Images are mostly *compressed* (e.g. JPEG format), which means the image size varies from image to image.
++ A single image is received as N data chunks, and the last chunk already contains a *part of the next* image.
 
 ## Output message
 For every part that has been decoded, an output message will be generated:
@@ -108,11 +141,12 @@ To make sure your device stream contains Content-Length headers, you can check t
 ⋅⋅⋅⋅⋅⋅![Msg.content](https://raw.githubusercontent.com/bartbutenaers/node-red-contrib-multipart-stream-decoder/master/images/stream_debug.png)
 
 + The node status icon will be a ***dot*** if the Content-Length header is available, or a ***ring*** when the header is absent:
-⋅⋅⋅⋅⋅⋅![Msg.content](https://raw.githubusercontent.com/bartbutenaers/node-red-contrib-multipart-stream-decoder/master/images/stream_debug.png)
+
+⋅⋅⋅⋅⋅⋅![Msg.content](https://raw.githubusercontent.com/bartbutenaers/node-red-contrib-multipart-stream-decoder/master/images/stream_status.png)
 
 ## Combination with encoder
-This decoder node could be used in combination with my encoder node.  When you want to display - in a dashboard - images at high speed, that cannot be accomplished using a single websocket channel.  To display the decoded images at high speed in a dashboard, the decode images could be encoded again to create a new MJPEG stream:
+This decoder node could be used in combination with my [encoder node](https://github.com/bartbutenaers/node-red-contrib-multipart-stream-encoder).  When you want to display - in a dashboard - images at high speed, that cannot be accomplished using a single websocket channel.  To display the decoded images at high speed in a dashboard, the decode images could be encoded again to create a new MJPEG stream:
 
 ![Decode encode](https://raw.githubusercontent.com/bartbutenaers/node-red-contrib-multipart-stream-decoder/master/images/stream_decode_encode.png)
 
-This example looks a bit useless, but normally extra processing will be executed on the images (between decoding and encoding).
+This example looks a bit useless, but normally extra processing will be executed on the images (between decoding and encoding): e.g. license plate recognition (using [node-red-contrib-openalpr-cloud](https://github.com/bartbutenaers/node-red-contrib-openalpr-cloud)), motion detection, ...
