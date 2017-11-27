@@ -21,7 +21,7 @@ module.exports = function(RED) {
     var urllib = require("url");
     var mustache = require("mustache");
     var autoParse = require('auto-parse'); 
-    var Buffers = require('buffers');
+    var Buffers = require('node-buffers');
     
     // Syntax from RFC 2046 (https://stackoverflow.com/questions/33619914/http-range-request-multipart-byteranges-is-there-a-crlf-at-the-end) :
     // ...
@@ -118,19 +118,19 @@ module.exports = function(RED) {
         // - We will look (for boundaries and header/body separators) in the buffer list, which has the advantage that it also looks in buffer overlaps.
         // - As soon as data (i.e. parts of chunks or complete chunks) have been processed, they will be removed from the buffer list.
         //
-        // To accomplish this, I use the 'buffers' package as buffer list (https://github.com/substack/node-buffers).  
-        // This package is not maintained anymore, but I didnt find a decent alternative:
+        // To accomplish this, I use the 'node-buffers' package as buffer list (https://github.com/dashevo/node-buffers).  
+        // This package is not very popular at the moment, but I didnt find a decent alternative:
         // - The 'bl' package (https://github.com/rvagg/bl) is well maintained, but the indexof pull request has never been merged (https://github.com/rvagg/bl/pull/30).
         // - The 'vise' package (https://github.com/hapijs/vise) is pretty new, but it also doesn't have an indexof function.
         // - The 'node-bufferlist' package (https://github.com/substack/node-bufferlist) is deprecated.  Succesor is the 'buffers' package that I use.
+        // - The 'buffers' package (https://github.com/substack/node-buffers), which is the successor of the node-bufferlist package.  However it hasn't been
+        //   maintained for some years, so it contains some bugs.
+        // The node-buffers package is a fork of the buffers package, and contains some bugfixes.
         //
         // Some remarks about the usage of the 'buffers' package:
         // - A slice results in a copy of the required buffer data !!!  This is in contractiction to a slice from a NodeJs buffer !!
         //   So only use slices for small amounts of data, like part headers.  Not for content data (because this would result e.g. in cloning entire images).
         // - A splice results in removals of buffers from the list, and (NodeJs buffer) slicing.  So here no data cloning is involved, which means better performance.
-        // - The 'get' function throws an exception (see https://github.com/substack/node-buffers/issues/16), so we should implement it ourselves (*):
-        //               var pos  = chunks.pos(index);
-        //               var next = chunks.buffers[pos.buf][pos.offset];
         // Summary: avoid using 'splice', except for short data snippets. Prefer 'splice' wherever the specified data is not needed anymore afterwards.
         //
         // Add following variables to the watch window of the Chrome debugger, to troubleshoot faster:
@@ -409,9 +409,7 @@ module.exports = function(RED) {
                         // We will investigate the 2 (first non-empty) bytes after the boundary, which should contain the EOL (which is 1 or 2 bytes long).
                         // Notice that spaces might be available between the eol and the boundary.
                         for (var i = boundary.length; i < chunks.length; i++) {
-                            // Get the byte at index i in the buffer, as explained in (*) above:
-                            pos = chunks.pos(i);
-                            next = chunks.buffers[pos.buf][pos.offset];
+                            next = chunks.get(i);
                            
                             // Skip all the whitespaces, and then select the next two bytes (or one byte if we reached the end of the current chunk)
                             if (next != ' ') {
