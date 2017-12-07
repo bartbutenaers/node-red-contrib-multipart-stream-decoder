@@ -44,7 +44,7 @@ module.exports = function(RED) {
         this.maximum = n.maximum;
         this.prevReq = null;
         this.prevRes = null;
-        this.stopped = false;
+        this.statusUpdated = false;
         
         var node = this;
                 
@@ -61,10 +61,10 @@ module.exports = function(RED) {
         }
 
         var prox, noprox;
-        if (process.env.http_proxy !== null) { prox = process.env.http_proxy; }
-        if (process.env.HTTP_PROXY !== null) { prox = process.env.HTTP_PROXY; }
-        if (process.env.no_proxy !== null) { noprox = process.env.no_proxy.split(","); }
-        if (process.env.NO_PROXY !== null) { noprox = process.env.NO_PROXY.split(","); }
+        if (process.env.http_proxy != null) { prox = process.env.http_proxy; }
+        if (process.env.HTTP_PROXY != null) { prox = process.env.HTTP_PROXY; }
+        if (process.env.no_proxy != null) { noprox = process.env.no_proxy.split(","); }
+        if (process.env.NO_PROXY != null) { noprox = process.env.NO_PROXY.split(","); }
         
         // Avoids DEPTH_ZERO_SELF_SIGNED_CERT error for self-signed certificates (https://github.com/request/request/issues/418).
         process.env.NODE_TLS_REJECT_UNAUTHORIZED = '0';
@@ -195,8 +195,7 @@ module.exports = function(RED) {
             }
             
             if (msg.hasOwnProperty("stop") && msg.stop === true) {
-                // Remember that the node has been stopped, so w
-                node.stopped = true;
+                node.statusUpdated = true;
                 
                 node.status({fill:"blue",shape:"dot",text:"stopped"});
                 // When returning, the previous stream has been aborted (above) and no new stream will be started (below).
@@ -205,6 +204,8 @@ module.exports = function(RED) {
             
             if (!url) {
                 node.error(RED._("No url specified"),msg);
+                node.status({fill:"red",shape:"dot",text:"no url"});
+                node.statusUpdated = true;
                 return;
             }
             
@@ -265,7 +266,7 @@ module.exports = function(RED) {
             //opts.highWaterMark = chunkSize;
             
             // Send the http request to the client, which should respond with a http stream
-            var req = ((/^https/.test(urltotest))?https:http).request(opts,function(res) {  
+            node.prevReq = ((/^https/.test(urltotest))?https:http).request(opts,function(res) {  
                 var searchString = "";
                 var chunks = Buffers();
                 var searchIndex = -1;
@@ -282,6 +283,8 @@ module.exports = function(RED) {
                 msg.headers = res.headers;
                 msg.responseUrl = res.responseUrl;
                 msg.payload = [];
+                
+                node.prevRes = res;
  
                 // msg.url = url;   // revert when warning above finally removed
                 
@@ -289,10 +292,6 @@ module.exports = function(RED) {
                 res.on('data',function(chunk) {
                     var next = "";
                     var pos = {};
-                    
-                    // Store the current request/response only in case streaming is detected, so it could be aborted afterwards
-                    node.prevReq = req; 
-                    node.prevRes = res;
                     
                     if (!Buffer.isBuffer(chunk)) {
                         // If the 'setEncoding(null)' fix above doesn't work anymore in a future Node.js release, make sure we notice that.
@@ -303,7 +302,8 @@ module.exports = function(RED) {
                         // Avoid keeping searching endless (e.g. for boundary, eol, ...), and consuming all memory
                         node.error("Chunked data length (" + chunks.length + ") exceeds the maximum (" + node.maximum + ")",msg);
                         node.status({fill:"red",shape:"ring",text:"Max length exceeded"});
-                        req.abort();
+                        node.statusUpdated = true;
+                        node.prevReq.abort();
                         return;
                     }
                             
@@ -344,7 +344,8 @@ module.exports = function(RED) {
                         if (!/multipart/.test(contentType)) {
                             node.error("A multipart stream should start with content-type containing 'multipart'",msg);
                             node.status({fill:"red",shape:"ring",text:"no multipart url"});
-                            req.abort();
+                            node.statusUpdated = true;
+                            node.prevReq.abort();
                             return;                        
                         }
                             
@@ -355,7 +356,8 @@ module.exports = function(RED) {
                         if(!boundary) {
                             boundary = 'error';
                             node.status({fill:"red",shape:"ring",text:"no boundary"});
-                            req.abort();
+                            node.statusUpdated = true;
+                            node.prevReq.abort();
                             return;
                         }
                         
@@ -379,8 +381,7 @@ module.exports = function(RED) {
                     if (boundary === 'error') {
                         // Make sure no data chunks are being processed, since we don't know which boundary we will have to search.
                         // Otherwise chunks will be collected into memory, until memory is full ...
-                        node.error("Ignoring received data, since no boundary has been specified",msg);
-                        return;                        
+                         return;                        
                     }
                     
                     // -----------------------------------------------------------------------------------------
@@ -428,7 +429,8 @@ module.exports = function(RED) {
                             eol = 'error';
                             node.error("Invalid EOL (" + eol + ") found",msg);
                             node.status({fill:"red",shape:"ring",text:"invalid eol"});
-                            req.abort();
+                            node.statusUpdated = true;
+                            node.prevReq.abort();
                             return;
                         }
                         
@@ -442,7 +444,7 @@ module.exports = function(RED) {
                     }
                     
                     if(eol === 'error') {
-                        node.error("Ignoring received data, since no EOL could be found",msg);
+                        //node.error("Ignoring received data, since no EOL could be found",msg);
                         return;
                     }
 
@@ -451,7 +453,7 @@ module.exports = function(RED) {
                     // -----------------------------------------------------------------------------------------
                     
                     if(searchString === 'error') {
-                        node.error("Ignoring received data, since the part data has been exceeded",msg);
+                        //node.error("Ignoring received data, since the part data has been exceeded",msg);
                         return;
                     }
                     
@@ -560,7 +562,7 @@ module.exports = function(RED) {
                         
                         // Reset the status (to remove the 'streaming' status).
                         // Except when the nodes is being stopped manually, otherwise the 'stopped' status will be overwritten
-                        if (!node.stopped) {
+                        if (!node.statusUpdated) {
                             node.status({});
                         }
                     }
@@ -577,33 +579,48 @@ module.exports = function(RED) {
                         // Send the latest part on the output port
                         handleMsg(newMsg, boundary, preRequestTimestamp, currentStatus, 0);
                     }
-                    node.stopped = false;
+                    node.statusUpdated = false;
                 });
             });
-            req.setTimeout(node.reqTimeout, function() {
+            node.prevReq.setTimeout(node.reqTimeout, function() {
                 node.error(RED._("server not responding"),msg);
                 setTimeout(function() {
                     node.status({fill:"red",shape:"ring",text:"server not responding"});
+                    node.statusUpdated = true;
                 },10);
-                req.abort();
+                
+                if (node.prevReq) {
+                    node.prevReq.abort();
+                }
+                
                 node.status({fill:"red",shape:"ring",text:"timeout"});
                 node.prevReq = null;
                 node.prevRes = null;
-                node.stopped = false;
+                node.statusUpdated = false;
             });
-            req.on('error',function(err) {
+            node.prevReq.on('error',function(err) {
                 node.error(err,msg);
                 msg.payload = err.toString() + " : " + url;
-                msg.statusCode = err.code;
-                msg.statusMessage = res.statusMessage;
+                
+                if (node.prevReq) {
+                    msg.statusCode = node.prevReq.statusCode;
+                    msg.statusMessage = node.prevReq.statusMessage;
+                }
+                else {
+                    msg.statusCode = 400;
+                }
+                
                 node.send(msg);
                 node.status({fill:"red",shape:"ring",text:err.code});
-                node.stopped = false;
+                
+                node.prevReq = null;
+                node.prevRes = null;
+                node.statusUpdated = false;
             });
             if (payload) {
-                req.write(payload);
+                node.prevReq.write(payload);
             }
-            req.end();
+            node.prevReq.end();
         });
 
         this.on("close",function() {
