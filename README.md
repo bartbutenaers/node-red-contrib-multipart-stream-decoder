@@ -7,7 +7,26 @@ Run the following npm command in your Node-RED user directory (typically ~/.node
 npm install node-red-contrib-multipart-stream-decoder
 ```
 ## Usage
-The goal is to decode a stream of data elements that arrive via http.  These elements can contain any kind of data (text, images, ...). One of the most known examples is an **MJPEG stream**, to receive continously JPEG images (like a video stream).  
+The goal is to decode a stream of data elements that arrive via http.  These elements can contain any kind of data (text, images, ...). 
+
+The most known multipart stream is the **MJPEG stream**, which is used to get IP camera images at high speed:
++ **Snapshot URL:** The standard Node-Red *HttpRequest* node can be used to get a single (snapshot) image from the IP camera, by entering the snapshot URL in the config screen.  Using an interval node this can be repeated, e.g. to get a camera image every second:
+
+    ![Snapshot url](https://raw.githubusercontent.com/bartbutenaers/node-red-contrib-multipart-stream-decoder/master/images/stream_snapshot_url.png)
+    ```
+    [{"id":"9bbed4ae.37a4f8","type":"base64","z":"47b91ceb.38a754","name":"Encode","x":420,"y":332,"wires":[["2f3ce560.9b0baa","cf80e726.d3eaa8"]]},{"id":"a5475243.f67c4","type":"http request","z":"47b91ceb.38a754","name":"","method":"GET","ret":"bin","url":"http://xxx.xxx.xxx.xxx/SnapshotJPEG?Resolution=320x240&Quality=High","tls":"","x":237.63544845581055,"y":331.3958396911621,"wires":[["9bbed4ae.37a4f8"]]},{"id":"bbc65977.8dc1f8","type":"interval","z":"47b91ceb.38a754","name":"interval","interval":"1","onstart":false,"msg":"ping","showstatus":false,"unit":"seconds","statusformat":"YYYY-MM-D HH:mm:ss","x":82.59029769897461,"y":330.8220520019531,"wires":[["a5475243.f67c4"]]},{"id":"2f3ce560.9b0baa","type":"ui_template","z":"47b91ceb.38a754","group":"4f44306b.c5a07","name":"Display image","order":1,"width":"6","height":"6","format":"<img width=\"16\" height=\"16\" alt=\"mjpeg test...\" src=\"data:image/jpg;base64,{{msg.payload}}\" />\n","storeOutMessages":true,"fwdInMessages":true,"templateScope":"local","x":620,"y":332,"wires":[[]]},{"id":"4f44306b.c5a07","type":"ui_group","z":"47b91ceb.38a754","name":"Kitchen","tab":"72e36c60.254134","order":1,"disp":true,"width":"6"},{"id":"72e36c60.254134","type":"ui_tab","z":"47b91ceb.38a754","name":"Cameras","icon":"camera_alt","order":2}]
+    ```
+    However the frame rate will not be high, due to the large amount of overhead and waiting (request - response - request - response- request - ...).  So you won't get a smooth video this way ...
+    
++ **MPJEG stream URL**: Every IP camera nowadays will also offer (beside to the snapshot URL) an MJPEG stream URL, that can be used to start an MJPEG stream.  This decoder node can be used to get an infinite stream of images from the IP camera, simply by entering the MJPEG stream URL in the config screen. Use a trigger node to start the stream 'once':
+
+    ![Stream url](https://raw.githubusercontent.com/bartbutenaers/node-red-contrib-multipart-stream-decoder/master/images/stream_stream_url.png)
+    ```
+    [{"id":"db5630e7.83cdc","type":"multipart-decoder","z":"47b91ceb.38a754","name":"","ret":"bin","url":"http://xxx.xxx.xxx.xxx:50000/nphMotionJpeg?Resolution=320x240&Quality=High","tls":"","delay":0,"maximum":"10000000","x":490,"y":1280,"wires":[["6535feb.cbf33"]]},{"id":"dfcc9a31.860948","type":"inject","z":"47b91ceb.38a754","name":"Start stream","topic":"","payload":"","payloadType":"date","repeat":"","crontab":"","once":false,"onceDelay":"","x":289.8333435058594,"y":1280.0000381469727,"wires":[["db5630e7.83cdc"]]},{"id":"6535feb.cbf33","type":"base64","z":"47b91ceb.38a754","name":"Encode","x":680,"y":1280,"wires":[["fb64a032.e945b"]]},{"id":"fb64a032.e945b","type":"ui_template","z":"47b91ceb.38a754","group":"1a7f6b0.0560695","name":"Display image","order":1,"width":"6","height":"6","format":"<img width=\"16\" height=\"16\" alt=\"stream test\" src=\"data:image/jpg;base64,{{msg.payload}}\" />\n","storeOutMessages":true,"fwdInMessages":true,"templateScope":"local","x":857.2569236755371,"y":1280.4166660308838,"wires":[[]]},{"id":"1a7f6b0.0560695","type":"ui_group","z":"","name":"Performance","tab":"18b10517.00400b","disp":true,"width":"6"},{"id":"18b10517.00400b","type":"ui_tab","z":"","name":"Performance","icon":"show_chart","order":5}]
+    ```
+    It is as simple as that ...
+    
+In both cases the image needs to be ***base64*** encoded before displaying it (in the dashboard or in the flow editor), to avoid problems with characters getting lost.  And in both cases the output type of the capture nodes (HttpRequest or MultipartStreamDecoder) should be ***Bufferr***, to avoid again that characters are being messed up.  After all, you don't want to end up with invalid images ...
 
 ***The decoder converts a continious stream into separate messages, whose payloads contain the received data.***  For example converting a continous MJPEG stream (from a camera) into separate images:
 
