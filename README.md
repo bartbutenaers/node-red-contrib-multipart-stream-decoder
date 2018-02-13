@@ -1,7 +1,7 @@
 # node-red-contrib-multipart-stream-decoder
 Node-Red node for decoding multipart streams over http
 
-Note about version ***0.0.2***: after a lot of useful feedback from [Simon Hailes](https://github.com/btsimonh) about version 0.0.1, the decoding algorithm had to be rewritten to the utmost extend.
+Note about version ***0.0.2***: [Simon Hailes](https://github.com/btsimonh) has been testing version 0.0.1 thoroughly.  To be able to solve all the issues, the decoding algorithm had to be rewritten to the utmost extend.
 
 ## Install
 Run the following npm command in your Node-RED user directory (typically ~/.node-red):
