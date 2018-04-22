@@ -49,6 +49,10 @@
         <input type="text" id="node-input-delay">
     </div>
     <div class="form-row">
+        <label for="node-input-blockSize"><i class="fa fa-arrows-alt-h"></i> Block size</label>
+        <input type="text" id="node-input-blockSize">
+    </div>
+    <div class="form-row">
         <label for="node-input-maximum"><i class="fa fa-hashtag"></i> Max. size</label>
         <input type="text" id="node-input-maximum">
     </div>    
@@ -81,6 +85,7 @@
         <li><code>delay</code> will be used to throttle the stream, if no delay has been specified in the node.</li>
     </ul>
     The <b>delay</b> is the (minimum) number of milliseconds between parts in a multipart stream, to allow throttling the stream.</p>
+    The <b>block size</b> is the number of parts in the output <code>msg.payload</code>.  E.g. when set to value 3, the output <code>msg.payload</code> will contain an array of 3 parts.  When set to value 1, the output <code>msg.payload</code> will contain only 1 part (not an array containing 1 part!).</p>
     </br>
     <p><b>Note</b>: If you need to configure a proxy please add <b>http_proxy=...</b> to your environment variables and restart Node-RED.</p>
 </script>
@@ -96,6 +101,7 @@
             tls: {type:"tls-config",required: false},
             delay: {value:0, required: false, validate:function(value) { return !value || !isNaN(value); }},
             maximum: {value:1000000, required: true, validate:function(value) { return !value || !isNaN(value); }},
+            blockSize: {value:1, required: false, validate:function(value) { return !value || !isNaN(value) || value<1; }},
         },
         credentials: {
             user: {type:"text"},
@@ -111,6 +117,9 @@
             return this.name?"node_label_italic":"";
         },
         oneditprepare: function() {
+            // Set a default block size of 1 for existing nodes that don't have that field yet.
+            $('#node-input-blockSize').val(this.blockSize || 1);
+  
             $("#node-input-useAuth").change(function() {
                 if ($(this).is(":checked")) {
                     $(".node-input-useAuth-row").show();
