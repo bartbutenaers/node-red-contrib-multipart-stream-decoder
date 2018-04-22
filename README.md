@@ -153,6 +153,15 @@ Take into consideration that determination of this number is not exact science. 
 + Images are mostly *compressed* (e.g. JPEG format), which means the image size varies from image to image.
 + A single image is received as N data chunks, and the last chunk already contains a *part of the next* image.
 
+### Block size (version 0.0.3 and above)
+By default the block size is 1, which means the output `msg.payload` will contain a single part from the multipart stream.  E.g. for an MJPEG stream, every message will contain a single image buffer.
+
+When a block size N is specified (with N > 1), the output `msg.payload` will contain an *array* of N parts from the multipart stream.  As soon as the decoder has received N parts, it will generate a single output message:
+
+![Block](https://raw.githubusercontent.com/bartbutenaers/node-red-contrib-multipart-stream-decoder/master/images/stream_block.png)
+
+This can be used in case the stream sends a massive amount of (small) parts.  For performance reasons, it might then be advisable to avoid generating a single output message for every part.  For example an audio stream will contain more than 40000 samples per second.
+
 ## Output message
 For every part that has been decoded, an output message will be generated:
 + `msg.payload` : Is the body of the part, for example an image.
