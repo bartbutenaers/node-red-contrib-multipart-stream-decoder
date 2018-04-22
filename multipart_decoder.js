@@ -38,12 +38,13 @@ module.exports = function(RED) {
     // ...
     function MultiPartDecoder(n) {
         RED.nodes.createNode(this,n);
-        this.delay   = n.delay;
-        this.url     = n.url;
-        this.ret     = n.ret || "txt";
-        this.maximum = n.maximum;
-        this.prevReq = null;
-        this.prevRes = null;
+        this.delay         = n.delay;
+        this.url           = n.url;
+        this.ret           = n.ret || "txt";
+        this.maximum       = n.maximum;
+        this.blockSize     = n.blockSize || 1;
+        this.prevReq       = null;
+        this.prevRes       = null;
         this.statusUpdated = false;
         
         var node = this;
@@ -70,17 +71,22 @@ module.exports = function(RED) {
         process.env.NODE_TLS_REJECT_UNAUTHORIZED = '0';
         
         function handleMsg(msg, boundary, preRequestTimestamp, currentStatus, contentLength) {
-            // Convert the Buffers list to a single NodeJs buffer, that can be send to the rest of the Node-Red flow
-            msg.payload = msg.payload.toBuffer();
-            
-            // Convert the payload to the required return type (currently 'bin')
+            // Convert all the parts in the payload to the required type (currently 'bin')
             if (node.ret !== "bin") {
-                msg.payload = msg.payload.toString('utf8'); // txt
-                
-                if (node.ret === "obj") {
-                    try { msg.payload = JSON.parse(msg.payload); } // obj
-                    catch(e) { node.warn("JSON parse error"); }
+                for (var i = 0; i < msg.payload.length; i++) {
+                    msg.payload[i] = msg.payload[i].toString('utf8'); // txt
+                    
+                    if (node.ret === "obj") {
+                        try { msg.payload[i] = JSON.parse(msg.payload[i]); } // obj
+                        catch(e) { node.warn("JSON parse error"); }
+                    }
                 }
+            }
+            
+            // When no blocks are required, the block size will be 1.
+            // In that case we will send the part itself in the output, not in a single-element array!
+            if (msg.payload.length === 1) {
+                msg.payload = msg.payload[0];
             }
                                  
             node.send(msg);
@@ -273,6 +279,8 @@ module.exports = function(RED) {
                 var contentLength = 0;
                 var partHeadersObject = {};
                 var problemDetected = false;
+                var blockParts = [];
+                var part = null;
                 
                 // Force NodeJs to return a Buffer (instead of a string): See https://github.com/nodejs/node/issues/6038
                 res.setEncoding(null);
@@ -461,7 +469,7 @@ module.exports = function(RED) {
                     while (true) { 
                         searchIndex = -1;
                     
-                        // The boundary search can be skipped, if the content lenght is specified in the stream (in the part headers).
+                        // The boundary search can be skipped, if the content length is specified in the stream (in the part headers).
                         // Indeed it is much faster to simply get the N specified bytes, instead of searching for the boundary through all the chunk data...
                         // Remark: for the first part the boundary will always be searched using indexof, but for the next parts the contentLength will be used.
                         if (searchString === boundary && contentLength > 0) {                               
@@ -492,15 +500,30 @@ module.exports = function(RED) {
                         if (searchString === boundary) {
                             // Useless to send an empty message when the boundary is found at index 0 (probably at the start of the stream)
                             if (searchIndex > 0) {
-                                // Clone the msg (without payload for speed)
-                                var newMsg = RED.util.cloneMessage(msg);
+                                // Seems a part body has been found ...
+                                
+                                // Convert the Buffers list to a single NodeJs buffer, that can be understood by the Node-Red flow
+                                var part = chunks.splice(0, searchIndex).toBuffer();
+                                
+                                // Store the part in the block array
+                                blockParts.push(part);
+                                part = null;
+                                
+                                // Only send a message when the block contains the required number of parts
+                                if (blockParts.length == node.blockSize) {
+                                    // Clone the msg (without payload for speed)
+                                    var newMsg = RED.util.cloneMessage(msg);
 
-                                // Set the part headers as JSON object in the output message
-                                newMsg.content = partHeadersObject;
-                                                                     
-                                // If a part body has been found, let's put a message on the output port.
-                                newMsg.payload = chunks.splice(0, searchIndex);
-                                handleMsg(newMsg, boundary, preRequestTimestamp,currentStatus, contentLength);
+                                    // Set the part headers as JSON object in the output message
+                                    newMsg.content = partHeadersObject;
+                                                                         
+                                    newMsg.payload = blockParts;
+                                    
+                                    handleMsg(newMsg, boundary, preRequestTimestamp,currentStatus, contentLength);
+                                    
+                                    // Start with a new empty block
+                                    blockParts = [];
+                                }
                                 
                                 // If a (non-zero) throttling delay is specified, the upload should be pauzed during that delay period.
                                 // If the message contains a throttling delay, it will be used if the node has no throttling delay.
@@ -529,7 +552,7 @@ module.exports = function(RED) {
                                     // Try to find the content-length header variable, which is optional
                                     if (name.toLowerCase() == 'content-length') {
                                         if (isNaN(value)) {
-                                            // Don't return because we simply ignore the content-lenght (i.e. search afterwards the 
+                                            // Don't return because we simply ignore the content-length (i.e. search afterwards the 
                                             // boundary through the data chunks).
                                             node.warn("The content-length is not numeric");
                                         }
@@ -567,14 +590,21 @@ module.exports = function(RED) {
                         }
                     }
                     else {
+                        // Let's handle all remaining data...
+                        
+                        // Convert the Buffers list to a single NodeJs buffer, that can be understood by the Node-Red flow
+                        var part = chunks.splice(0, chunks.length).toBuffer();
+                                                        
+                        // Store the data in the block array
+                        blockParts.push(part);
+                                
                         // Clone the msg (without payload for speed)
                         var newMsg = RED.util.cloneMessage(msg);
 
                         // Set the part headers as JSON object in the output message
                         newMsg.content = partHeadersObject;
                                                              
-                        // Put a message on the output port, with all remaining data
-                        newMsg.payload = chunks.splice(0, chunks.length);
+                        newMsg.payload = blockParts;
                                 
                         // Send the latest part on the output port
                         handleMsg(newMsg, boundary, preRequestTimestamp, currentStatus, 0);
