@@ -20,7 +20,7 @@ The most known multipart stream is the **MJPEG stream**, which is used to get IP
     ```
     However the frame rate will not be high, due to the large amount of overhead and waiting (request - response - request - response- request - ...).  So you won't get a smooth video this way ...
     
-+ **MPJEG stream URL**: Every IP camera nowadays will also offer (beside to the snapshot URL) an MJPEG stream URL, that can be used to start an MJPEG stream.  This decoder node can be used to get an infinite stream of images from the IP camera, simply by entering the MJPEG stream URL in the config screen. Use a trigger node to start the stream 'once':
++ **MPJEG stream URL**: Most IP cameras nowadays will also offer (beside to the snapshot URL) an MJPEG stream URL, that can be used to start an MJPEG stream.  This decoder node can be used to get an infinite stream of images from the IP camera, simply by entering the MJPEG stream URL in the config screen. Use a trigger node to start the stream 'once':
 
     ![Stream url](https://raw.githubusercontent.com/bartbutenaers/node-red-contrib-multipart-stream-decoder/master/images/stream_stream_url.png)
     ```
@@ -37,7 +37,7 @@ In both cases the image needs to be ***base64*** encoded before displaying it (i
 However - besides to MJPEG - lots of other multipart stream use cases exist.  For example the Hikvision cameras offer multipart alert streams (see [manual](http://oversea-download.hikvision.com/uploadfile/Leaflet/ISAPI/HIKVISION%20ISAPI_2.0-IPMD%20Service.pdf) section 8.11.30) for continiously communicating all their statusses (pir, motion, ...) as XML strings.
 
 ### Streaming basics
-When we execute a HTTP request, the result will be a HTTP response containing the result data.  For example every camera provides an URL that can be used to get a single snapshot image.  However that mechanism isn't fast enough to get fluent video, due to the time interval between every request and response.  
+When we execute a HTTP request, the result will be a HTTP response containing the result data.  For example most cameras provide an URL that can be used to get a single snapshot image.  However that mechanism isn't fast enough to get fluent video, due to the time interval between every request and response.  
 
 To get images very fast, we will need to setup streaming.  When we send a single HTTP request, we want to get an (in)finite HTTP response:
 
