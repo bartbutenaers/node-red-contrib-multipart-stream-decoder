@@ -611,6 +611,31 @@ module.exports = function(RED) {
                     }
                     node.statusUpdated = false;
                 });
+                // Version 0.0.4: Not only a request can fail, but also a response can fail.
+                // See https://github.com/bartbutenaers/node-red-contrib-multipart-stream-decoder/issues/4
+                res.on('error',function(err) {
+                    node.error(err,msg);
+                    msg.payload = "(Response failed) " + err.toString() + " : " + url;
+                    
+                    if (node.prevReq) {
+                        msg.statusCode = node.prevReq.statusCode;
+                        msg.statusMessage = node.prevReq.statusMessage;
+                    }
+                    else {
+                        msg.statusCode = 400;
+                    }
+                    
+                    node.send(msg);
+                    node.status({fill:"red",shape:"ring",text:err.code});
+                    
+                    if (node.prevReq) {
+                        node.prevReq.abort();
+                    }
+                    
+                    node.prevReq = null;
+                    node.prevRes = null;
+                    node.statusUpdated = false;
+                });
             });
             node.prevReq.setTimeout(node.reqTimeout, function() {
                 node.error(RED._("server not responding"),msg);
@@ -630,7 +655,7 @@ module.exports = function(RED) {
             });
             node.prevReq.on('error',function(err) {
                 node.error(err,msg);
-                msg.payload = err.toString() + " : " + url;
+                msg.payload = "(Request failed) " + err.toString() + " : " + url;
                 
                 if (node.prevReq) {
                     msg.statusCode = node.prevReq.statusCode;
