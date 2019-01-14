@@ -187,3 +187,14 @@ This decoder node could be used in combination with my [encoder node](https://gi
 ![Decode encode](https://raw.githubusercontent.com/bartbutenaers/node-red-contrib-multipart-stream-decoder/master/images/stream_decode_encode.png)
 
 This example looks a bit useless, but normally extra processing will be executed on the images (between decoding and encoding): e.g. license plate recognition (using [node-red-contrib-openalpr-cloud](https://github.com/bartbutenaers/node-red-contrib-openalpr-cloud)), motion detection, ...
+
+## Timeout (version 0.0.4 and above)
+When a running stream is interrupted, an output message (with ```msg.payload``` containing *"Error: server not responding"*) will be generated after a timeout.  This can for example happen when the physical wire to the IP camera is disconnected.
+
+Similar to other Node-RED nodes (e.g. HttpRequest ...), that timeout can be specified by uncommenting following lines in the settings.js file:
+```
+// Timeout in milliseconds for HTTP request connections
+//  defaults to 120 seconds
+//httpRequestTimeout: 120000,
+```
+When no value is specified here, a default timeout of 120 seconds will be used.
