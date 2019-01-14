@@ -615,7 +615,7 @@ module.exports = function(RED) {
                 // See https://github.com/bartbutenaers/node-red-contrib-multipart-stream-decoder/issues/4
                 res.on('error',function(err) {
                     node.error(err,msg);
-                    msg.payload = "(Response failed) " + err.toString() + " : " + url;
+                    msg.payload = err.toString() + " : " + url;
                     
                     if (node.prevReq) {
                         msg.statusCode = node.prevReq.statusCode;
@@ -639,6 +639,8 @@ module.exports = function(RED) {
             });
             node.prevReq.setTimeout(node.reqTimeout, function() {
                 node.error(RED._("server not responding"),msg);
+                msg.payload = "Error: server not responding : " + url;
+                
                 setTimeout(function() {
                     node.status({fill:"red",shape:"ring",text:"server not responding"});
                     node.statusUpdated = true;
@@ -648,14 +650,16 @@ module.exports = function(RED) {
                     node.prevReq.abort();
                 }
                 
+                node.send(msg);
                 node.status({fill:"red",shape:"ring",text:"timeout"});
+                
                 node.prevReq = null;
                 node.prevRes = null;
                 node.statusUpdated = false;
             });
             node.prevReq.on('error',function(err) {
                 node.error(err,msg);
-                msg.payload = "(Request failed) " + err.toString() + " : " + url;
+                msg.payload = err.toString() + " : " + url;
                 
                 if (node.prevReq) {
                     msg.statusCode = node.prevReq.statusCode;
