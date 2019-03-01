@@ -39,6 +39,7 @@ module.exports = function(RED) {
         this.delay         = n.delay;
         this.url           = n.url;
         this.ret           = n.ret || "txt";
+        this.authType      = n.authType || "basic";
         this.maximum       = n.maximum;
         this.blockSize     = n.blockSize || 1;
         this.prevReq       = null;
@@ -246,14 +247,32 @@ module.exports = function(RED) {
                     }
                 }
             }
-            if (this.credentials && this.credentials.user) {
-                opts.auth = this.credentials.user+":"+(this.credentials.password||"");
-                opts.auth = {
-                    user: this.credentials.user,
-                    pass: this.credentials.password || "",
-                    sendImmediately: false
-                };
+            
+            if (this.credentials) {
+                if (this.authType === "basic") {
+                    if (this.credentials.user) {
+                        opts.auth = {
+                            user: this.credentials.user,
+                            pass: this.credentials.password || ""
+                        };
+                    }
+                } else if (this.authType === "digest") {
+                    if (this.credentials.user) {
+                        // The first request will be send without auth information.  Based on the 401 response, the library can determine 
+                        // which auth type is required by the server.  Then the request is resubmitted the with the appropriate auth header.
+                        opts.auth = {
+                            user: this.credentials.user,
+                            pass: this.credentials.password || "",
+                            sendImmediately: false
+                        };
+                    }
+                } else if (this.authType === "bearer") {
+                    opts.auth = {
+                        bearer: this.credentials.password || ""
+                    };
+                }
             }
+            
             var payload = null;
 
             var noproxy;
