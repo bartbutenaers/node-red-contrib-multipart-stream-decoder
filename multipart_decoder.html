@@ -27,11 +27,11 @@
         <label for="node-input-useAuth" style="width: 70%;"> Use authentication</label>
         <div style="margin-left: 20px" class="node-input-useAuth-row hide">
             <div class="form-row">
-                <label for="node-input-authType"><i class="fa fa-user-secret "></i> <span data-i18n="httpin.label.authType"></span></label>
+                <label for="node-input-authType"><i class="fa fa-user-secret "></i> <span>Type</span></label>
                 <select type="text" id="node-input-authType" style="width:70%;">
-                    <option value="basic"  data-i18n="httpin.basic"></option>
-                    <option value="digest" data-i18n="httpin.digest"></option>
-                    <option value="bearer" data-i18n="httpin.bearer"></option>
+                    <option value="basic" >basic authentication</option>
+                    <option value="digest">digest authentication</option>
+                    <option value="bearer">bearer authentication</option>
                 </select>
             </div>
             <div class="form-row node-input-basic-row">
@@ -40,7 +40,6 @@
             </div>
             <div class="form-row">
                 <label for="node-input-password"><i class="fa fa-lock"></i> <span id="node-span-password">Password</span><span id="node-span-token" style="hide">Token</span></label>
-                <label for="node-input-password"><i class="fa fa-lock"></i> Password</label>
                 <input type="password" id="node-input-password">
             </div>
         </div>
