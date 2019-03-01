@@ -3,6 +3,8 @@ Node-Red node for decoding multipart streams over http
 
 Note about version ***0.0.2***: [Simon Hailes](https://github.com/btsimonh) has been testing version 0.0.1 thoroughly.  To be able to solve all the issues, the decoding algorithm had to be rewritten to the utmost extend.
 
+Note about version ***1.0.0***: Another version is being used behind the scenes, so there might be changes compared to the previous versions.
+
 ## Install
 Run the following npm command in your Node-RED user directory (typically ~/.node-red):
 ```
@@ -133,10 +135,15 @@ Then the value of `msg.topic` will be automatically inserted in the placeholder.
 ### SSL/TLS connection
 Make use of configured TLS connections (in a common TLS configuration node), where you can provide paths to your certificate files. 
 
-### Basic authentication
-Apply your username and password for http requests that require user authentication.  This data will be stored outside the flow (i.e. in a flows_xxx_cred.json file instead of the normal flows_xxx.json file).  This way these credentials will not be shared with other users when a part of the flow is being exported.
+### Authentication
+Starting from version 1.0.0 three different authentication methods can be used:
++ Basic authentication
++ Digest authentication
++ Bearer authentication
 
-Note that basic authentication can be used both for the http and https protocols.
+Apply your username and password/token for http requests that require user authentication.  This data will be stored outside the flow (i.e. in a flows_xxx_cred.json file instead of the normal flows_xxx.json file).  This way these credentials will not be shared with other users when a part of the flow is being exported.
+
+Note that basic authentication can be used both for the http and https protocols, but https is advised to make sure that your password is transferred across a secure connection.  In case of digest authentication the password itself will be encrypted, so it will be transferred over a normal http connection.
 
 ### Output (format)
 The output data in `msg.payload` can be formatted as UTF8 string, as JSON object, or as binary buffer.  Make sure to use binary buffer in case of images, i.e. when decoding an MJPEG stream.
