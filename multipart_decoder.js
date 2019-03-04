@@ -344,7 +344,7 @@ module.exports = function(RED) {
                 chunks.push(chunk);
                 
                 // When there is a problem getting the data over http, we will stop streaming and start collecting the entire error content
-                if (this.response.statusCode < 200 || this.response.statusCode > 299) {
+                if (node.prevRes.statusCode < 200 || node.prevRes.statusCode > 299) {
                     // As soon as the problem is detected, clear (once) all previous data from the chunks.
                     if (!problemDetected) {
                         chunks.splice(0, chunks.length - chunk.length);
@@ -362,7 +362,7 @@ module.exports = function(RED) {
                 //  - Determine which boundary text is going to be used during streaming
                 // -----------------------------------------------------------------------------------------
                 if (!boundary) {
-                    var contentType = this.response.headers['content-type'];
+                    var contentType = node.prevRes.headers['content-type'];
                     
                     if (!/multipart/.test(contentType)) {
                         node.error("A multipart stream should start with content-type containing 'multipart'",msg);
