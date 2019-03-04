@@ -24,14 +24,22 @@
     </div>
     <div class="form-row">
         <input type="checkbox" id="node-input-useAuth" style="display: inline-block; width: auto; vertical-align: top;">
-        <label for="node-input-useAuth" style="width: 70%;"> Use basic authentication</label>
+        <label for="node-input-useAuth" style="width: 70%;"> Use authentication</label>
         <div style="margin-left: 20px" class="node-input-useAuth-row hide">
             <div class="form-row">
+                <label for="node-input-authType"><i class="fa fa-user-secret "></i> <span>Type</span></label>
+                <select type="text" id="node-input-authType" style="width:70%;">
+                    <option value="basic" >basic authentication</option>
+                    <option value="digest">digest authentication</option>
+                    <option value="bearer">bearer authentication</option>
+                </select>
+            </div>
+            <div class="form-row node-input-basic-row">
                 <label for="node-input-user"><i class="fa fa-user"></i> Username</label>
                 <input type="text" id="node-input-user">
             </div>
             <div class="form-row">
-                <label for="node-input-password"><i class="fa fa-lock"></i> Password</label>
+                <label for="node-input-password"><i class="fa fa-lock"></i> <span id="node-span-password">Password</span><span id="node-span-token" style="display:none">Token</span></label>
                 <input type="password" id="node-input-password">
             </div>
         </div>
@@ -99,6 +107,7 @@
             ret: {value:"txt"},
             url:{value:""},
             tls: {type:"tls-config",required: false},
+            authType: {value: "basic"},
             delay: {value:0, required: false, validate:function(value) { return !value || !isNaN(value); }},
             maximum: {value:1000000, required: true, validate:function(value) { return !value || !isNaN(value); }},
             blockSize: {value:1, required: false, validate:function(value) { return !value || !isNaN(value) || value<1; }},
@@ -123,12 +132,31 @@
             $("#node-input-useAuth").change(function() {
                 if ($(this).is(":checked")) {
                     $(".node-input-useAuth-row").show();
+                    // Nodes (< version 1.0.0) with credentials but without authentication type, need type 'basic'
+                    if (!$('#node-input-authType').val()) {
+                        $('#node-input-authType').val('basic');
+                    }
                 } else {
                     $(".node-input-useAuth-row").hide();
+                    $('#node-input-authType').val('');
                     $('#node-input-user').val('');
                     $('#node-input-password').val('');
                 }
             });
+            
+          $("#node-input-authType").change(function() {
+                if ($(this).val() == "basic" || $(this).val() == "digest") {
+                    $(".node-input-basic-row").show();
+                    $('#node-span-password').show();
+                    $('#node-span-token').hide();
+                } else if ($(this).val() == "bearer") {
+                    $(".node-input-basic-row").hide();
+                    $('#node-span-password').hide();
+                    $('#node-span-token').show();
+                    $('#node-input-user').val('');
+                }
+            });
+          
             if (this.credentials.user || this.credentials.has_password) {
                 $('#node-input-useAuth').prop('checked', true);
             } else {
