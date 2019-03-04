@@ -52,7 +52,7 @@ module.exports = function(RED) {
             var tlsNode = RED.nodes.getNode(n.tls);
         }
          
-        // When a timeout has been specified in the settings file, we should take that into account
+        // When a timeout has been specified in the settings file, we should take into account
         if (RED.settings.httpRequestTimeout) { 
             this.reqTimeout = parseInt(RED.settings.httpRequestTimeout) || 120000; 
         }
@@ -309,6 +309,32 @@ module.exports = function(RED) {
                 msg.payload = [];
                 
                 node.prevRes = response;
+                
+                // Version 0.0.4: Not only a request can fail, but also a response can fail.
+                // See https://github.com/bartbutenaers/node-red-contrib-multipart-stream-decoder/issues/4
+                node.prevRes.on('error',function(err) {
+                    node.error(err,msg);
+                    msg.payload = err.toString() + " : " + url;
+                        
+                    if (node.prevReq) {
+                        msg.statusCode = node.prevReq.statusCode;
+                        msg.statusMessage = node.prevReq.statusMessage;
+                    }
+                   else {
+                        msg.statusCode = 400;
+                   }
+
+                   node.send(msg);
+                   node.status({fill:"red",shape:"ring",text:err.code});
+                        
+                   if (node.prevReq) {
+                        node.prevReq.abort();
+                   }
+                        
+                   node.prevReq = null;
+                   node.prevRes = null;
+                   node.statusUpdated = false;
+                });
             })
             
             // See multipart protocol explanation: https://www.w3.org/Protocols/rfc1341/7_2_Multipart.html
@@ -544,13 +570,10 @@ module.exports = function(RED) {
                             // If the message contains a throttling delay, it will be used if the node has no throttling delay.
                             var delay = (node.delay && node.delay > 0) ? node.delay : msg.delay;
                             if (delay && delay !== 0) {
-                                this.response.pause();
-                                
-                                // See https://developer.mozilla.org/en-US/docs/Web/API/WindowOrWorkerGlobalScope/setTimeout#The_this_problem
-                                var that = this;
+                                node.prevRes.pause();
 
                                 setTimeout(function () {
-                                    that.response.resume();
+                                    node.prevRes.resume();
                                 }, delay);
                             }
                         }                               
@@ -630,32 +653,6 @@ module.exports = function(RED) {
                     handleMsg(newMsg, boundary, preRequestTimestamp, currentStatus, 0);
                 }
                 node.statusUpdated = false;
-            });
-            
-            // Version 0.0.4: Not only a request can fail, but also a response can fail.
-            // See https://github.com/bartbutenaers/node-red-contrib-multipart-stream-decoder/issues/4
-            this.response.on('error',function(err) {
-                node.error(err,msg);
-                msg.payload = err.toString() + " : " + url;
-                    
-                if (node.prevReq) {
-                    msg.statusCode = node.prevReq.statusCode;
-                    msg.statusMessage = node.prevReq.statusMessage;
-                }
-               else {
-                    msg.statusCode = 400;
-               }
-
-               node.send(msg);
-               node.status({fill:"red",shape:"ring",text:err.code});
-                    
-               if (node.prevReq) {
-                    node.prevReq.abort();
-               }
-                    
-               node.prevReq = null;
-               node.prevRes = null;
-               node.statusUpdated = false;
             });
                 
             node.prevReq.on('error', function (err) {
