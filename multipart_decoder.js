@@ -16,12 +16,10 @@
 
 module.exports = function(RED) {
     "use strict";
-    var http = require("follow-redirects").http;
-    var https = require("follow-redirects").https;
-    var urllib = require("url");
     var mustache = require("mustache");
     var autoParse = require('auto-parse'); 
     var Buffers = require('node-buffers');
+    var DigestFetch = require('digest-fetch');
     
     // Syntax from RFC 2046 (https://stackoverflow.com/questions/33619914/http-range-request-multipart-byteranges-is-there-a-crlf-at-the-end) :
     // ...
@@ -38,38 +36,43 @@ module.exports = function(RED) {
     // ...
     function MultiPartDecoder(n) {
         RED.nodes.createNode(this,n);
-        this.delay         = n.delay;
-        this.url           = n.url;
-        this.ret           = n.ret || "txt";
-        this.maximum       = n.maximum;
-        this.blockSize     = n.blockSize || 1;
-        this.prevReq       = null;
-        this.prevRes       = null;
-        this.statusUpdated = false;
-        
+        this.delay              = n.delay;
+        this.url                = n.url;
+        this.authentication     = n.authentication;
+        this.ret                = n.ret || "txt";
+        this.maximum            = n.maximum;
+        this.blockSize          = n.blockSize || 1;
+        this.activeResponse     = null;
+        this.statusUpdated      = false;
+        this.activeResponse     = null;
+        this.timeoutOccured     = false;
+        this.timestampLastChunk = 0;
+
         var node = this;
-                
+        
+// TODO :  required????????????????????
         if (n.tls) {
             var tlsNode = RED.nodes.getNode(n.tls);
         }
-         
-        // When a timeout has been specified in the settings file, we should take that into account
-        if (RED.settings.httpRequestTimeout) { 
-            this.reqTimeout = parseInt(RED.settings.httpRequestTimeout) || 120000; 
-        }
-        else { 
-            this.reqTimeout = 120000; 
+        
+        function abortCurrentStream() {
+            // If a stream is running, then abort it now
+            if (node.controller) {
+                node.controller.abort();
+            }
+           
+            // If a timeout check is running (at some interval), then stop that check
+            if(node.timeoutCheck) {
+                clearInterval(node.timeoutCheck);
+            }
+ 
+            node.stream = null;
+            node.controller = null;
+            node.activeResponse = null;
+
+            node.status({fill:"blue",shape:"dot",text:"stopped"});
         }
 
-        var prox, noprox;
-        if (process.env.http_proxy != null) { prox = process.env.http_proxy; }
-        if (process.env.HTTP_PROXY != null) { prox = process.env.HTTP_PROXY; }
-        if (process.env.no_proxy != null) { noprox = process.env.no_proxy.split(","); }
-        if (process.env.NO_PROXY != null) { noprox = process.env.NO_PROXY.split(","); }
-        
-        // Avoids DEPTH_ZERO_SELF_SIGNED_CERT error for self-signed certificates (https://github.com/request/request/issues/418).
-        process.env.NODE_TLS_REJECT_UNAUTHORIZED = '0';
-        
         function handleMsg(msg, boundary, preRequestTimestamp, currentStatus, contentLength) {
             // Convert all the parts in the payload to the required type (currently 'bin')
             if (node.ret !== "bin") {
@@ -89,7 +92,7 @@ module.exports = function(RED) {
                 msg.payload = msg.payload[0];
             }
                                  
-            node.send(msg);
+            node.send([msg, null]);
             
             if (msg.statusCode < 200 || msg.statusCode > 299) {
                 // When there is a problem getting the data over http, we will show the error
@@ -100,7 +103,7 @@ module.exports = function(RED) {
                 if (boundary && (Date.now() - currentStatus.timestamp) > 1000) {
                     // For multipart streaming, the node status is inverted every second (to let user know it is still busy processing). 
                     // This means the status will start flashing: empty -> Streaming -> empty -> Streaming -> empty -> Streaming -> ...
-                    if (currentStatus.value === "{}") {
+                    if (Object.keys(currentStatus.value).length === 0 /*empty object*/) {
                         // Display another ring when content-length is available or not
                         if (contentLength > 0) {
                             currentStatus.value = {fill:"blue",shape:"dot",text:"streaming"};
@@ -110,7 +113,7 @@ module.exports = function(RED) {
                         }
                     }
                     else {
-                        currentStatus.value = "{}";
+                        currentStatus.value = {};
                     }
                     
                     node.status(currentStatus.value);
@@ -144,14 +147,24 @@ module.exports = function(RED) {
         // - chunks.toString()
         // - searchIndex
         // - searchString
-        this.on("input",function(msg) {
+        this.on("input", async function(msg) {
             var boundary = "";
             var eol = "";
             var currentStatus = {timestamp:0, value:'{}'}; 
             var preRequestTimestamp = process.hrtime();
-            
+
             node.status({fill:"blue",shape:"dot",text:"requesting"});
-                        
+                                    
+            // If a previous request is still busy (endless) streaming, then stop it (undependent whether msg.stop exists or not)
+            abortCurrentStream();
+            
+            if (msg.hasOwnProperty("stop") && msg.stop === true) {
+                node.statusUpdated = true;
+
+                // When returning, the previous stream has been aborted (above) and no new stream will be started (below).
+                return;
+            }
+                   
             // When no url has been specified in the node config, the 'url' value in the input message will be used
             var url = node.url || msg.url;
             
@@ -159,57 +172,9 @@ module.exports = function(RED) {
             if (url && url.indexOf("{{") >= 0) {
                 url = mustache.render(node.url,msg);
             }
-            
-            if (msg.hasOwnProperty("pause") && msg.pause === true) {
-                if (node.prevRes) {
-                    if (node.prevRes.isPaused() === true) {
-                        node.warn("Useless to send msg.pause when the active stream is already paused");   
-                    }
-                    else {
-                        node.prevRes.pause();
-                        node.status({fill:"orange",shape:"ring",text:"paused"});
-                    }
-                }     
-                else {
-                    node.warn("Useless to send msg.pauze when no stream is active");
-                }                        
-                
-                return;
-            }
-            
-            if (msg.hasOwnProperty("resume") && msg.resume === true) {
-                if (node.prevRes) {
-                    if (node.prevRes.isPaused() === false) {
-                        node.warn("Useless to send msg.resume when the active stream is not paused");   
-                    }
-                    else {
-                        node.prevRes.resume();
-                    }
-                }     
-                else {
-                    node.warn("Useless to send msg.resume when no stream is active");
-                }                        
-                
-                return;
-            }
-                                    
-            // If a previous request is still busy (endless) streaming, then stop it (undependent whether msg.stop exists or not)
-            if (node.prevReq) {
-                node.prevReq.abort();
-                node.prevReq = null;
-                node.prevRes = null;
-            }
-            
-            if (msg.hasOwnProperty("stop") && msg.stop === true) {
-                node.statusUpdated = true;
-                
-                node.status({fill:"blue",shape:"dot",text:"stopped"});
-                // When returning, the previous stream has been aborted (above) and no new stream will be started (below).
-                return;
-            }
-            
+
             if (!url) {
-                node.error(RED._("No url specified"),msg);
+                node.error("No url specified", msg);
                 node.status({fill:"red",shape:"dot",text:"no url"});
                 node.statusUpdated = true;
                 return;
@@ -223,81 +188,95 @@ module.exports = function(RED) {
                     url = "http://"+url;
                 }
             }
+ 
+            // When a timeout has been specified in the settings file, we should take that into account
+            if (RED.settings.httpRequestTimeout) { 
+                this.reqTimeout = parseInt(RED.settings.httpRequestTimeout) || 120000; 
+            }
+            else { 
+                this.reqTimeout = 120000; 
+            }
+
+            // Ability to abort a running fetch request (added in NodeJs v14.17.0).
+            // Start a new controller for each request.  Because once a controller has been aborted, it's signal will continue to be aborted.
+            // As a result a new stream would immediately stop after being started.
+            node.controller = new AbortController();
             
-            var opts = urllib.parse(url);
-            opts.method = 'GET';
-            opts.headers = {};
+            var fetchOptions = {};
+            fetchOptions.method = 'GET';
+            fetchOptions.signal = node.controller.signal;
+            fetchOptions.headers = {};
 
             if (msg.headers) {
                 for (var v in msg.headers) {
                     if (msg.headers.hasOwnProperty(v)) {
                         var name = v.toLowerCase();
-                        opts.headers[name] = msg.headers[v];
+                        fetchOptions.headers[name] = msg.headers[v];
                     }
                 }
             }
-            if (this.credentials && this.credentials.user) {
-                opts.auth = this.credentials.user+":"+(this.credentials.password||"");
-            }
-            var payload = null;
 
-            var urltotest = url;
-            var noproxy;
-            if (noprox) {
-                for (var i in noprox) {
-                    if (url.indexOf(noprox[i]) !== -1) { noproxy=true; }
-                }
-            }
-            if (prox && !noproxy) {
-                var match = prox.match(/^(http:\/\/)?(.+)?:([0-9]+)?/i);
-                if (match) {
-                    opts.headers['Host'] = opts.host;
-                    var heads = opts.headers;
-                    var path = opts.pathname = opts.href;
-                    opts = urllib.parse(prox);
-                    opts.path = opts.pathname = path;
-                    opts.headers = heads;
-                    opts.method = method;
-                    urltotest = match[0];
-                }
-                else { node.warn("Bad proxy url: " + process.env.http_proxy); }
-            }
-            
             if (tlsNode) {
-                tlsNode.addTLSOptions(opts);
+                tlsNode.addTLSOptions(fetchOptions);
             }
             
             // TODO
             //var chunkSize = 30;
-            //opts.highWaterMark = chunkSize;
+            //fetchOptions.highWaterMark = chunkSize;
+           
+            debugger;
+            
+            // Reset all the parameters required for a new stream
+            var searchString = "";
+            var chunks = Buffers();
+            var searchIndex = -1;
+            var contentLength = 0;
+            var partHeadersObject = {};
+            var problemDetected = false;
+            var blockParts = [];
+            var part = null;
             
             // Send the http request to the client, which should respond with a http stream
-            node.prevReq = ((/^https/.test(urltotest))?https:http).request(opts,function(res) {  
-                var searchString = "";
-                var chunks = Buffers();
-                var searchIndex = -1;
-                var contentLength = 0;
-                var partHeadersObject = {};
-                var problemDetected = false;
-                var blockParts = [];
-                var part = null;
-                
-                // Force NodeJs to return a Buffer (instead of a string): See https://github.com/nodejs/node/issues/6038
-                res.setEncoding(null);
-                delete res._readableState.decoder;
-              
-                msg.statusCode = res.statusCode;
-                msg.statusMessage = res.statusMessage;
-                msg.headers = res.headers;
-                msg.responseUrl = res.responseUrl;
-                msg.payload = [];
-                
-                node.prevRes = res;
- 
-                // msg.url = url;   // revert when warning above finally removed
-                
+            try {
+                switch(node.authentication) {
+                    case "basic":
+                        const basicAuthClient = new DigestFetch(node.credentials.user, node.credentials.password, { basic: true })
+                        node.activeResponse = await basicAuthClient.fetch(url, fetchOptions);
+                        break;
+                    case "digest":
+                        const digestAuthClient = new DigestFetch(node.credentials.user, node.credentials.password, { basic: false })
+                        node.activeResponse = await digestAuthClient.fetch(url, fetchOptions);
+                        break;
+                    default: // case 'none'
+                        node.activeResponse = await fetch(url);
+                        break;
+                }
+            }
+            catch(err) {
+                // TODO
+                debugger;
+                return;
+            }
+            
+            node.stream = node.activeResponse.body;
+            
+            // Force NodeJs to return a Buffer (instead of a string): See https://github.com/nodejs/node/issues/6038
+            // TODO is dit nog nodig???  Zie ook mijn vraag op discourse voor Nick...
+            //node.activeResponse.setEncoding(null);
+            //delete node.activeResponse._readableState.decoder;
+                  
+            msg.statusCode = node.activeResponse.statusCode;
+            msg.statusMessage = node.activeResponse.statusMessage;
+            msg.headers = node.activeResponse.headers;
+            msg.responseUrl = node.activeResponse.responseUrl;
+            msg.payload = [];
+
+            // See https://stackoverflow.com/a/72658566
+            node.stream.on('readable', () => {
+                let chunk;
+// TODO dit in een handlechunk functie steken                
                 // See multipart protocol explanation: https://www.w3.org/Protocols/rfc1341/7_2_Multipart.html
-                res.on('data',function(chunk) {
+                while (null !== (chunk = node.stream.read())) {
                     var next = "";
                     var pos = {};
                     
@@ -311,7 +290,7 @@ module.exports = function(RED) {
                         node.error("Chunked data length (" + chunks.length + ") exceeds the maximum (" + node.maximum + ")",msg);
                         node.status({fill:"red",shape:"ring",text:"Max length exceeded"});
                         node.statusUpdated = true;
-                        node.prevReq.abort();
+                        abortCurrentStream();
                         return;
                     }
                             
@@ -328,8 +307,11 @@ module.exports = function(RED) {
                     // These chunks can be very long, but also very short...
                     chunks.push(chunk);
                     
+                    // Keep track when the last chunk has arrived
+                    node.timestampLastChunk = Date.now();
+                    
                     // When there is a problem getting the data over http, we will stop streaming and start collecting the entire error content
-                    if (res.statusCode < 200 || res.statusCode > 299) {
+                    if (node.activeResponse.statusCode < 200 || node.activeResponse.statusCode > 299) {
                         // As soon as the problem is detected, clear (once) all previous data from the chunks.
                         if (!problemDetected) {
                             chunks.splice(0, chunks.length - chunk.length);
@@ -347,13 +329,13 @@ module.exports = function(RED) {
                     //  - Determine which boundary text is going to be used during streaming
                     // -----------------------------------------------------------------------------------------
                     if (!boundary) {
-                        var contentType = this.headers['content-type'];
+                        var contentType = node.activeResponse.headers.get("content-type");
                         
                         if (!/multipart/.test(contentType)) {
                             node.error("A multipart stream should start with content-type containing 'multipart'",msg);
                             node.status({fill:"red",shape:"ring",text:"no multipart url"});
                             node.statusUpdated = true;
-                            node.prevReq.abort();
+                            abortCurrentStream();
                             return;                        
                         }
                             
@@ -365,7 +347,7 @@ module.exports = function(RED) {
                             boundary = 'error';
                             node.status({fill:"red",shape:"ring",text:"no boundary"});
                             node.statusUpdated = true;
-                            node.prevReq.abort();
+                            abortCurrentStream();
                             return;
                         }
                         
@@ -438,7 +420,7 @@ module.exports = function(RED) {
                             node.error("Invalid EOL (" + eol + ") found",msg);
                             node.status({fill:"red",shape:"ring",text:"invalid eol"});
                             node.statusUpdated = true;
-                            node.prevReq.abort();
+                            abortCurrentStream();
                             return;
                         }
                         
@@ -529,9 +511,9 @@ module.exports = function(RED) {
                                 // If the message contains a throttling delay, it will be used if the node has no throttling delay.
                                 var delay = (node.delay && node.delay > 0) ? node.delay : msg.delay;
                                 if (delay && delay !== 0) {
-                                    res.pause();
+                                    node.activeResponse.body.pause();
                                     setTimeout(function () {
-                                        res.resume();
+                                        node.activeResponse.body.resume();
                                     }, delay);
                                 }
                             }                               
@@ -562,7 +544,7 @@ module.exports = function(RED) {
                                     }
                                 }
                             });
-                        }  
+                        } 
 
                         // Also remove the searchString, since that is not needed anymore.
                         chunks.splice(0, searchString.length);
@@ -578,117 +560,133 @@ module.exports = function(RED) {
                             searchString = boundary;
                         }
                     }
-                });
-                res.on('end',function() {
-                    if(boundary) {
-                        // If streaming is interrupted, the last part might not be complete: skip handleMsg...
-                        
-                        // Reset the status (to remove the 'streaming' status).
-                        // Except when the nodes is being stopped manually, otherwise the 'stopped' status will be overwritten
-                        if (!node.statusUpdated) {
-                            node.status({});
-                        }
+                }
+            })
+
+            node.stream.on('end', () => {
+                debugger;
+                clearInterval(node.timeoutCheck); // TODO dit ook in de on 'errror' oproepen?
+                    
+                if(boundary) {
+                    // If streaming is interrupted, the last part might not be complete: skip handleMsg...
+                    
+                    // Reset the status (to remove the 'streaming' status).
+                    // Except when the nodes is being stopped manually, otherwise the 'stopped' status will be overwritten
+                    if (!node.statusUpdated) {
+                        node.status({});
+                    }
+                }
+                else {
+                    // Let's handle all remaining data...
+                    
+                    // Convert the Buffers list to a single NodeJs buffer, that can be understood by the Node-Red flow
+                    var part = chunks.splice(0, chunks.length).toBuffer();
+                                                    
+                    // Store the data in the block array
+                    blockParts.push(part);
+                            
+                    // Clone the msg (without payload for speed)
+                    var newMsg = RED.util.cloneMessage(msg);
+
+                    // Set the part headers as JSON object in the output message
+                    newMsg.content = partHeadersObject;
+                                                         
+                    newMsg.payload = blockParts;
+                            
+                    // Send the latest part on the output port
+                    handleMsg(newMsg, boundary, preRequestTimestamp, currentStatus, 0);
+                }
+                node.statusUpdated = false;
+            })
+
+            node.stream.on('error', (err) => {
+                debugger;
+                if(err.type === 'aborted') {
+                    if(node.timeoutOccured) {
+                        node.error("Timeout after serving not responding", msg);
+                        msg.payload = "Timeout after serving not responding";
+                        node.status({fill:"red",shape:"ring",text:"timeout"});
                     }
                     else {
-                        // Let's handle all remaining data...
-                        
-                        // Convert the Buffers list to a single NodeJs buffer, that can be understood by the Node-Red flow
-                        var part = chunks.splice(0, chunks.length).toBuffer();
-                                                        
-                        // Store the data in the block array
-                        blockParts.push(part);
-                                
-                        // Clone the msg (without payload for speed)
-                        var newMsg = RED.util.cloneMessage(msg);
-
-                        // Set the part headers as JSON object in the output message
-                        newMsg.content = partHeadersObject;
-                                                             
-                        newMsg.payload = blockParts;
-                                
-                        // Send the latest part on the output port
-                        handleMsg(newMsg, boundary, preRequestTimestamp, currentStatus, 0);
+                        node.error("Stream stopped", msg);
+                        msg.payload = "Stream stopped";
+                        node.status({fill:"red",shape:"ring",text:"stopped"}); 
                     }
-                    node.statusUpdated = false;
-                });
-                // Version 0.0.4: Not only a request can fail, but also a response can fail.
-                // See https://github.com/bartbutenaers/node-red-contrib-multipart-stream-decoder/issues/4
-                res.on('error',function(err) {
+                    
+                    node.timeoutOccured = false;
+                    
+                    /*setTimeout(function() {
+                        node.status({fill:"red",shape:"ring",text:"server not responding"});
+                        node.statusUpdated = true;
+                    },10);*/
+                }
+                else {
                     node.error(err,msg);
                     msg.payload = err.toString() + " : " + url;
-                    
-                    if (node.prevReq) {
-                        msg.statusCode = node.prevReq.statusCode;
-                        msg.statusMessage = node.prevReq.statusMessage;
+
+                    if (node.activeResponse) {
+                        msg.statusCode = node.activeResponse.statusCode;
+                        msg.statusMessage = node.activeResponse.statusMessage;
                     }
                     else {
                         msg.statusCode = 400;
                     }
-                    
-                    node.send(msg);
+
                     node.status({fill:"red",shape:"ring",text:err.code});
-                    
-                    if (node.prevReq) {
-                        node.prevReq.abort();
-                    }
-                    
-                    node.prevReq = null;
-                    node.prevRes = null;
-                    node.statusUpdated = false;
-                });
-            });
-            node.prevReq.setTimeout(node.reqTimeout, function() {
-                node.error(RED._("server not responding"),msg);
-                msg.payload = "Error: server not responding : " + url;
-                
-                setTimeout(function() {
-                    node.status({fill:"red",shape:"ring",text:"server not responding"});
-                    node.statusUpdated = true;
-                },10);
-                
-                if (node.prevReq) {
-                    node.prevReq.abort();
                 }
                 
-                node.send(msg);
-                node.status({fill:"red",shape:"ring",text:"timeout"});
+                node.send([null, msg]);
                 
-                node.prevReq = null;
-                node.prevRes = null;
+                abortCurrentStream();
+                
                 node.statusUpdated = false;
-            });
-            node.prevReq.on('error',function(err) {
+            })
+            
+            // Not only a request can fail, but also a response can fail.
+            // See https://github.com/bartbutenaers/node-red-contrib-multipart-stream-decoder/issues/4
+            // TODO kunnen we dit niet via de stream opvangen????
+            /*node.activeResponse.on('error',function(err) {
                 node.error(err,msg);
                 msg.payload = err.toString() + " : " + url;
                 
-                if (node.prevReq) {
-                    msg.statusCode = node.prevReq.statusCode;
-                    msg.statusMessage = node.prevReq.statusMessage;
+                if (node.activeResponse) {
+                    msg.statusCode = node.activeResponse.statusCode;
+                    msg.statusMessage = node.activeResponse.statusMessage;
                 }
                 else {
                     msg.statusCode = 400;
                 }
                 
-                node.send(msg);
+                node.send([null, msg]);
                 node.status({fill:"red",shape:"ring",text:err.code});
                 
-                node.prevReq = null;
-                node.prevRes = null;
+                abortCurrentStream();
                 node.statusUpdated = false;
-            });
+            });*/
+
+            // Run a check every second
+            node.timeoutCheck = setInterval(function() {
+                // If no chunk has arrived during the specified timeout period, then abort the stream
+                if(Date.now() - node.timestampLastChunk > node.reqTimeout) {
+                    node.timeoutOccured = true;
+                    abortCurrentStream();
+                }
+            }, 1000);
+            
+    
+   
+/* TODO
             if (payload) {
-                node.prevReq.write(payload);
+                node.activeRequest.write(payload);
             }
-            node.prevReq.end();
+
+            node.activeRequest.end();
+*/
         });
 
         this.on("close",function() {
-            if (node.prevReq) {
-                // At (re)deploy make sure the streaming is closed, otherwise e.g. it keeps sending data across already (visually) removed wires
-                node.prevReq.abort();
-                node.prevReq = null;
-                node.prevRes = null;
-            }
+            // At (re)deploy make sure the streaming is closed, otherwise e.g. it keeps sending data across already (visually) removed wires
+            abortCurrentStream();
             
             node.status({});
         });
