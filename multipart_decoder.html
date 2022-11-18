@@ -23,18 +23,20 @@
         </div>
     </div>
     <div class="form-row">
-        <input type="checkbox" id="node-input-useAuth" style="display: inline-block; width: auto; vertical-align: top;">
-        <label for="node-input-useAuth" style="width: 70%;"> Use basic authentication</label>
-        <div style="margin-left: 20px" class="node-input-useAuth-row hide">
-            <div class="form-row">
-                <label for="node-input-user"><i class="fa fa-user"></i> Username</label>
-                <input type="text" id="node-input-user">
-            </div>
-            <div class="form-row">
-                <label for="node-input-password"><i class="fa fa-lock"></i> Password</label>
-                <input type="password" id="node-input-password">
-            </div>
-        </div>
+        <label for="node-input-authentication"><i class="fa fa-id-card-o"></i> Authentication</label>
+        <select type="text" id="node-input-authentication" style="width:70%;">
+            <option value="none"> None</option>
+            <option value="basic"> Basic</option>
+            <option value="digest"> Digest</option>
+        </select>
+    </div>
+    <div class="form-row authentication-row">
+        <label for="node-input-user"><i class="fa fa-user"></i> Username</label>
+        <input type="text" id="node-input-user">
+    </div>
+    <div class="form-row authentication-row">
+        <label for="node-input-password"><i class="fa fa-lock"></i> Password</label>
+        <input type="password" id="node-input-password">
     </div>
     <div class="form-row">
         <label for="node-input-ret"><i class="fa fa-arrow-left"></i> Output</label>
@@ -99,6 +101,7 @@
             ret: {value:"txt"},
             url:{value:""},
             tls: {type:"tls-config",required: false},
+            authentication: {value: "basic"},
             delay: {value:0, required: false, validate:function(value) { return !value || !isNaN(value); }},
             maximum: {value:1000000, required: true, validate:function(value) { return !value || !isNaN(value); }},
             blockSize: {value:1, required: false, validate:function(value) { return !value || !isNaN(value) || value<1; }},
@@ -108,7 +111,7 @@
             password: {type: "password"}
         },
         inputs:1,
-        outputs:1,
+        outputs:2,
         icon: "decoder.png",
         label: function() {
             return this.name || "multipart decoder";
@@ -120,22 +123,14 @@
             // Set a default block size of 1 for existing nodes that don't have that field yet.
             $('#node-input-blockSize').val(this.blockSize || 1);
   
-            $("#node-input-useAuth").change(function() {
-                if ($(this).is(":checked")) {
-                    $(".node-input-useAuth-row").show();
+            $("#node-input-authentication").change(function() {
+                if (this.value == "none") {
+                    $(".authentication-row").hide();
                 } else {
-                    $(".node-input-useAuth-row").hide();
-                    $('#node-input-user').val('');
-                    $('#node-input-password').val('');
+                    $(".authentication-row").show();
                 }
             });
-            if (this.credentials.user || this.credentials.has_password) {
-                $('#node-input-useAuth').prop('checked', true);
-            } else {
-                $('#node-input-useAuth').prop('checked', false);
-            }
-            $("#node-input-useAuth").change();
-            
+ 
             function updateTLSOptions() {
                 if ($("#node-input-usetls").is(':checked')) {
                     $("#node-row-tls").show();
