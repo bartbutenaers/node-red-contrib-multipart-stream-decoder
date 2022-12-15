@@ -1,19 +1,19 @@
 {
     "name"         : "node-red-contrib-multipart-stream-decoder",
-    "version"      : "0.0.4",
+    "version"      : "1.0.0",
     "description"  : "Node Red node for decoding multipart streams over http",
     "dependencies": {
-        "follow-redirects":"1.2.4",
-        "url": "0.11.0",
-        "mustache": "2.3.0",
-        "auto-parse":"1.3.0",
-        "node-buffers":"0.1.1"
+        "mustache": "^2.3.0",
+        "auto-parse":"^1.3.0",
+        "node-buffers":"^0.1.1",
+        "axios": "^1.2.1",
+        "@mhoc/axios-digest-auth": "^0.8.0"
     }, 
     "author": {
         "name": "Bart Butenaers"
     },
     "license": "Apache-2.0",
-    "keywords": [ "node-red", "multipart", "http", "stream", "mjpeg", "decode", "video" ],
+    "keywords": [ "node-red", "multipart", "http", "stream", "mjpeg", "decode", "video", "chunk", "motion" ],
     "bugs": {
         "url": "https://github.com/bartbutenaers/node-red-contrib-multipart-stream-decoder/issues"
     },
