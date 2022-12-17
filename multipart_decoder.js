@@ -16,12 +16,11 @@
 
 module.exports = function(RED) {
     "use strict";
-    var http = require("follow-redirects").http;
-    var https = require("follow-redirects").https;
-    var urllib = require("url");
     var mustache = require("mustache");
     var autoParse = require('auto-parse'); 
     var Buffers = require('node-buffers');
+    var axios = require('axios');
+    var AxiosDigestAuth = require('@mhoc/axios-digest-auth');
     
     // Syntax from RFC 2046 (https://stackoverflow.com/questions/33619914/http-range-request-multipart-byteranges-is-there-a-crlf-at-the-end) :
     // ...
@@ -38,39 +37,357 @@ module.exports = function(RED) {
     // ...
     function MultiPartDecoder(n) {
         RED.nodes.createNode(this,n);
-        this.delay         = n.delay;
-        this.url           = n.url;
-        this.ret           = n.ret || "txt";
-        this.maximum       = n.maximum;
-        this.blockSize     = n.blockSize || 1;
-        this.prevReq       = null;
-        this.prevRes       = null;
-        this.statusUpdated = false;
-        
+        this.delay              = n.delay;
+        this.url                = n.url;
+        this.authentication     = n.authentication;
+        this.ret                = n.ret || "txt";
+        this.maximum            = n.maximum;
+        this.blockSize          = n.blockSize || 1;
+        this.enableLog          = n.enableLog || "off";
+        this.activeResponse     = null;
+        this.isPaused           = false;
+        this.statusUpdated      = false;
+        this.timeoutOccured     = false;
+        this.timestampLastChunk = 0;
+        this.timeoutCheck       = null;
+
         var node = this;
-                
+
         if (n.tls) {
             var tlsNode = RED.nodes.getNode(n.tls);
         }
-         
-        // When a timeout has been specified in the settings file, we should take that into account
-        if (RED.settings.httpRequestTimeout) { 
-            this.reqTimeout = parseInt(RED.settings.httpRequestTimeout) || 120000; 
+ 
+        function sleep(milliseconds) {
+            return new Promise(resolve => setTimeout(resolve, milliseconds));
+        } 
+
+        function debugLog(text) {
+            if (node.enableLog === "on") {
+                console.log("MULTIPART STREAM : " + text);
+            }
         }
-        else { 
-            this.reqTimeout = 120000; 
+        
+        async function handleChunk(chunk, msg) {
+            var next = "";
+            var pos = {};
+            
+            if (!Buffer.isBuffer(chunk)) {
+                // If the 'setEncoding(null)' fix above doesn't work anymore in a future Node.js release, make sure we notice that.
+                throw new Error("HTTP Request data chunk not a Buffer");
+            }
+            
+            if (node.chunks.length > node.maximum) {
+                // Avoid keeping searching endless (e.g. for boundary, eol, ...), and consuming all memory
+                node.error("Chunked data length (" + node.chunks.length + ") exceeds the maximum (" + node.maximum + ")",msg);
+                node.status({fill:"red",shape:"ring",text:"Max length exceeded"});
+                node.statusUpdated = true;
+                stopCurrentResponseStream();
+                return;
+            }
+                    
+            // Make sure we only search through the new chunk, since we might have been searching through the previous chunks already.
+            // When the node.searchString contains 'abcdefg', make sure you also search part of in the previous chunks (because the end of 
+            // the previous chunk could contain 'abcdef', while the last 'g' is in the new chunk).
+            // Remark: be aware that there might be not enough previous data available (i.e. size shorter than node.searchString) => minimum 0
+            var offset = Math.max(0, node.chunks.length - node.searchString.length + 2);
+            
+            // When starting with a new chunk one or more previous chunks could be already available, when the current part 
+            // is splitted across multiple chunks.  Indeed data is splitted into chunks by the NodeJs, undependent of the content.
+            // Since concatenating buffers is bad for performance, we will store the individual buffers in a list.  The Buffers
+            // package allows us to treat the multiple buffers as a single buffer (e.g. searching a pattern across buffers).
+            // These chunks can be very long, but also very short...
+            node.chunks.push(chunk);
+            
+            // Keep track when the last chunk has arrived
+            node.timestampLastChunk = Date.now();
+            
+            // When there is a problem getting the data over http, we will stop streaming and start collecting the entire error content
+            if (node.activeResponse.status < 200 || node.activeResponse.status > 299) {
+                // As soon as the problem is detected, clear (once) all previous data from the chunks.
+                if (!node.problemDetected) {
+                    node.chunks.splice(0, node.chunks.length - chunk.length);
+                    node.partHeadersObject = {};
+                    node.problemDetected = true;
+                }
+                
+                // Skip streaming
+                return;
+            }
+        
+            // -----------------------------------------------------------------------------------------
+            // Parsing global headers (at the start of the stream) :
+            //  - Automatically check whether multipart streaming is required 
+            //  - Determine which boundary text is going to be used during streaming
+            // -----------------------------------------------------------------------------------------
+            if (!node.boundary) {
+                var contentType = node.activeResponse.headers["content-type"];
+                
+                if (!/multipart/.test(contentType)) {
+                    node.error("A multipart stream should start with content-type containing 'multipart'",msg);
+                    node.status({fill:"red",shape:"ring",text:"no multipart url"});
+                    node.statusUpdated = true;
+                    stopCurrentResponseStream();
+                    return;                        
+                }
+                    
+                // Automatically detect the required boundary (that will be used between parts of the stream).
+                // Remark: unwanted whitespaces should be ignored (\s*).                        
+                node.boundary = (contentType.match(/.*;\s*boundary=(.*)/) || [null, null])[1];
+
+                if(!node.boundary) {
+                    node.boundary = 'error';
+                    node.status({fill:"red",shape:"ring",text:"no boundary"});
+                    node.statusUpdated = true;
+                    stopCurrentResponseStream();
+                    return;
+                }
+                
+                // A boundary might contain colon's (:), for example "gc0p4Jq0M:2Yt08jU534c0p" to indicate that it consists out of multiple parts. 
+                // And that each of those parts is syntactically identical to an RFC 822 message, except that the header area might be completely 
+                // empty.  Such boundaries must be specified in the global header between quotations marks ("..."), which must be removed here.
+                node.boundary = node.boundary.trim();
+                node.boundary.replace('"', '');
+
+                // A boundary needs to start with -- (even if -- is absent in the http header)
+                if (!node.boundary.startsWith('--')) {
+                    node.boundary = '--' + node.boundary;
+                }
+                
+                // The boundary should arrive at the start of the stream, so let's start searching for it.
+                // Remark: we will look for boundary string (instead of the eol that should be available before the boundary),
+                // because the protocol allows also eol's in the part body !!
+                node.searchString = node.boundary;                
+            }
+            
+            if (node.boundary === 'error') {
+                // Make sure no data chunks are being processed, since we don't know which boundary we will have to search.
+                // Otherwise chunks will be collected into memory, until memory is full ...
+                 return;                        
+            }
+            
+            // -----------------------------------------------------------------------------------------
+            // End-of-line (EOL determination).
+            //
+            // The EOL sequence is required for parsing, and can have one of the following values:
+            // - LF   = linefeed ( \n ) // EOL for Unix and Linux and Macintosh (Mac OSX) systems
+            // - CR   = carriage return ( \r ) for old Macintosh systems
+            // - CRLF = carriage return linefeed ( \r\n ) for Windows systems
+            //  
+            // Debugging tip: \r = ASCII character 13 and \n = ASCII character 10
+            // -----------------------------------------------------------------------------------------
+            if(!node.eol) {
+                // Try to find the first boundary in the stream
+                node.searchIndex = node.chunks.indexOf(node.boundary, 0);
+                
+                if (node.searchIndex == -1) {
+                    // The received chunks don't contain the boundary yet, so try again when the next chunk arrives ...
+                    return;
+                }
+                    
+                // The sender can (optionally) send a preambule before the first boundary.  That is explanatory note for non-MIME 
+                // conformant readers, which should be skipped !
+                node.chunks.splice(0, node.searchIndex);
+                
+                // We will investigate the 2 (first non-empty) bytes after the boundary, which should contain the EOL (which is 1 or 2 bytes long).
+                // Notice that spaces might be available between the eol and the boundary.
+                for (var i = node.boundary.length; i < node.chunks.length; i++) {
+                    next = node.chunks.get(i);
+                   
+                    // Skip all the whitespaces, and then select the next two bytes (or one byte if we reached the end of the current chunk)
+                    if (next != ' ') {
+                        node.eol = node.chunks.slice(i, i + 2).toString();
+                        break;
+                    }
+                }
+                    
+                if (node.eol.length < 2) {
+                    // When we haven't found two (non-empty) bytes yet, let's start all over again when the next chunk arrives.
+                    node.eol = "";
+                    return;
+                }
+                
+                if (node.eol.charAt(0) !== '\r' && node.eol.charAt(0) !== '\n') {
+                    node.eol = 'error';
+                    node.error("Invalid EOL (" + node.eol + ") found",msg);
+                    node.status({fill:"red",shape:"ring",text:"invalid eol"});
+                    node.statusUpdated = true;
+                    stopCurrentResponseStream();
+                    return;
+                }
+                
+                if (node.eol.charAt(1) !== '\r' && node.eol.charAt(1) !== '\n') {
+                    node.eol = node.eol.charAt(0);
+                }
+                
+                // Now everything is ready to start the stream.  Currently a number of slices could already have been received (during
+                // boundary and EOL detection).  Make sure the stream startup starts from the beginning of the stream.
+                offset = 0;
+            }
+            
+            if(node.eol === 'error') {
+                //node.error("Ignoring received data, since no EOL could be found",msg);
+                return;
+            }
+
+            // -----------------------------------------------------------------------------------------
+            // Stream the data in the newly arrived chunk
+            // -----------------------------------------------------------------------------------------
+            
+            if(node.searchString === 'error') {
+                //node.error("Ignoring received data, since the part data has been exceeded",msg);
+                return;
+            }
+            
+            // Let's loop, since a single (large) data chunk could contain multiple (short) parts
+            while (true) { 
+                node.searchIndex = -1;
+            
+                // The boundary search can be skipped, if the content length is specified in the stream (in the part headers).
+                // Indeed it is much faster to simply get the N specified bytes, instead of searching for the boundary through all the chunk data...
+                // Remark: for the first part the boundary will always be searched using indexof, but for the next parts the contentLength will be used.
+                if (node.searchString === node.boundary && node.contentLength > 0) {                               
+                    if (node.chunks.length < node.contentLength + node.boundary.length) {
+                        // We have not received enough chunk data yet (i.e. less than the required contentLenght), so we didn't found the boundary yet
+                        node.searchIndex = -1;
+                    }
+                    else {
+                        // Based on the content length, determine where the boundary will be located (in the chunk data)
+                        node.searchIndex = node.contentLength;
+                    }
+                }
+                else {                          
+                    // Search for the specified string in the received chunk data (which will use lot's of CPU for large data chunks)
+                    node.searchIndex = node.chunks.indexOf(node.searchString, offset);                          
+                }
+                
+                // Make sure the offset is not used afterwards (during processing of the 'same' new data chunk)
+                offset = 0;
+
+                if (node.searchIndex < 0) { 
+                    // Since we didn't find our node.searchString in the received chunks, we will have to wait until the next chunk arrives
+                    return;
+                }                      
+                
+                // When a boundary has been found, this means that both the part headers and part body have been found.
+                // Store all this part information in a single message, and send it to the output port.
+                if (node.searchString === node.boundary) {
+                    // Useless to send an empty message when the boundary is found at index 0 (probably at the start of the stream)
+                    if (node.searchIndex > 0) {
+                        // Seems a part body has been found ...
+                        
+                        // Convert the Buffers list to a single NodeJs buffer, that can be understood by the Node-Red flow
+                        var part = node.chunks.splice(0, node.searchIndex).toBuffer();
+                        
+                        // Store the part in the block array
+                        node.blockParts.push(part);
+                        part = null;
+                        
+                        // Only send a message when the block contains the required number of parts
+                        if (node.blockParts.length == node.blockSize) {
+                            // Clone the msg (without payload for speed)
+                            var newMsg = RED.util.cloneMessage(msg);
+
+                            // Set the part headers as JSON object in the output message
+                            newMsg.content = node.partHeadersObject;
+                                                                 
+                            newMsg.payload = node.blockParts;
+                            
+                            sendOutputMessage(newMsg, node.boundary, node.contentLength);
+                            
+                            // Start with a new empty block
+                            node.blockParts = [];
+                        }
+                        
+                        if (node.isPaused) {
+                            node.status({fill:"blue",shape:"dot",text:"paused"});
+                            
+                            // Check every second if the stream still needs to stay paused
+                            while (node.isPaused) {
+                                await sleep(1000);
+                            }
+                            
+                            debugLog("The pause loop has been ended (because isPaused is false)");
+                        }
+                        else {
+                            // If a (non-zero) throttling delay is specified, the upload should be pauzed during that delay period.
+                            // If the message contains a throttling delay, it will be used if the node has no throttling delay.
+                            var delay = parseInt((node.delay && node.delay > 0) ? node.delay : msg.delay);
+                            if (delay && delay !== 0) {
+                                await sleep(delay);
+                                //debugLog("The throttling delay has ended after " + delay + " msecs");
+                            }
+                        }
+                    }
+                }
+                else { // When the header-body-separator has been found, this means that the part headers have been found...  
+                    node.partHeadersObject = {};
+                    node.contentLength = 0;
+                    
+                    // Convert the part headers to a JSON object (for the output message later on)
+                    node.chunks.splice(0, node.searchIndex).toString('utf8').trim().split(node.eol).forEach(function(entry) {
+                        var entryArray = entry.split(":");
+                        if (entryArray.length == 2) {
+                            // Convert all the string values to primitives (boolean, number, ...)
+                            var name = entryArray[0].trim();
+                            var value = autoParse(entryArray[1].trim());   
+                            node.partHeadersObject[name] = value;
+                            
+                            // Try to find the content-length header variable, which is optional
+                            if (name.toLowerCase() == 'content-length') {
+                                if (isNaN(value)) {
+                                    // Don't return because we simply ignore the content-length (i.e. search afterwards the 
+                                    // boundary through the data chunks).
+                                    node.warn("The content-length is not numeric");
+                                }
+                                else {
+                                    node.contentLength = value;
+                                }
+                            }
+                        }
+                    });
+                } 
+
+                // Also remove the searchString, since that is not needed anymore.
+                node.chunks.splice(0, node.searchString.length);
+                
+                // Switch to the other search string, for our next search ...
+                if (node.searchString === node.boundary) {                            
+                    // Boundary found, so from here on we will try to find a header-body-separator
+                    // The header-body-separator consists out of TWO EOL sequences !!!!
+                    node.searchString = node.eol + node.eol; 
+                }
+                else {
+                    // The header-body-separator has been found, so from here on we will try to find a boundary
+                    node.searchString = node.boundary;
+                }
+            }
         }
 
-        var prox, noprox;
-        if (process.env.http_proxy != null) { prox = process.env.http_proxy; }
-        if (process.env.HTTP_PROXY != null) { prox = process.env.HTTP_PROXY; }
-        if (process.env.no_proxy != null) { noprox = process.env.no_proxy.split(","); }
-        if (process.env.NO_PROXY != null) { noprox = process.env.NO_PROXY.split(","); }
-        
-        // Avoids DEPTH_ZERO_SELF_SIGNED_CERT error for self-signed certificates (https://github.com/request/request/issues/418).
-        process.env.NODE_TLS_REJECT_UNAUTHORIZED = '0';
-        
-        function handleMsg(msg, boundary, preRequestTimestamp, currentStatus, contentLength) {
+        function stopCurrentResponseStream() {
+            // Quit the pause (sleep) loop
+            if (node.isPaused) {
+                debugLog("Request to stop pausing (isPaused = false)");
+                node.isPaused = false;
+            }
+            
+            // Quit the loop that reads continiously chunks from the response stream
+            if (node.activeResponse) {
+                debugLog("Request to stop reading chunks (activeResponse=null)");
+                node.activeResponse = null;
+            }
+            
+            if(node.timeoutCheck) {
+                clearInterval(node.timeoutCheck);
+                node.timeoutCheck = null;
+                debugLog("Timeout check interval stopped");
+            }
+            
+
+            
+            node.status({fill:"blue",shape:"dot",text:"stopped"});
+        }
+
+        function sendOutputMessage(msg, boundary, contentLength) {
             // Convert all the parts in the payload to the required type (currently 'bin')
             if (node.ret !== "bin") {
                 for (var i = 0; i < msg.payload.length; i++) {
@@ -89,7 +406,7 @@ module.exports = function(RED) {
                 msg.payload = msg.payload[0];
             }
                                  
-            node.send(msg);
+            node.send([msg, null]);
             
             if (msg.statusCode < 200 || msg.statusCode > 299) {
                 // When there is a problem getting the data over http, we will show the error
@@ -97,24 +414,24 @@ module.exports = function(RED) {
                 node.status({fill:"red",shape:"ring",text:msg.statusMessage});
             }
             else {
-                if (boundary && (Date.now() - currentStatus.timestamp) > 1000) {
+                if (boundary && (Date.now() - node.currentStatus.timestamp) > 1000) {
                     // For multipart streaming, the node status is inverted every second (to let user know it is still busy processing). 
                     // This means the status will start flashing: empty -> Streaming -> empty -> Streaming -> empty -> Streaming -> ...
-                    if (currentStatus.value === "{}") {
+                    if (Object.keys(node.currentStatus.value).length === 0 /*empty object*/) {
                         // Display another ring when content-length is available or not
                         if (contentLength > 0) {
-                            currentStatus.value = {fill:"blue",shape:"dot",text:"streaming"};
+                            node.currentStatus.value = {fill:"blue",shape:"dot",text:"streaming"};
                         }
                         else {
-                            currentStatus.value = {fill:"blue",shape:"ring",text:"streaming"};
+                            node.currentStatus.value = {fill:"blue",shape:"ring",text:"streaming"};
                         }
                     }
                     else {
-                        currentStatus.value = "{}";
+                        node.currentStatus.value = {};
                     }
                     
-                    node.status(currentStatus.value);
-                    currentStatus.timestamp = Date.now();
+                    node.status(node.currentStatus.value);
+                    node.currentStatus.timestamp = Date.now();
                 }
             }
         }
@@ -144,14 +461,60 @@ module.exports = function(RED) {
         // - chunks.toString()
         // - searchIndex
         // - searchString
-        this.on("input",function(msg) {
-            var boundary = "";
-            var eol = "";
-            var currentStatus = {timestamp:0, value:'{}'}; 
-            var preRequestTimestamp = process.hrtime();
+        this.on("input", async function(msg) {
+            // Caution: node.activeResponse.body.pause() doesn't work since node-fetch hasn't implemented it
+            if (msg.hasOwnProperty("pause") && msg.pause === true) {
+                if (!node.activeResponse) {
+                    // No response body stream active, i.e. no connection to the sender
+                    node.warn("There is no stream active");
+                }
+                else if (node.isPaused) {
+                    node.warn("The active stream is already paused");
+                }
+                else {
+                    debugLog("Pause stream (set isPaused=true)");
+                    // Pause the stream by starting to sleep (infinite long), i.e. by stopping to read chunks from the active stream.
+                    // The original NodeJs response instance has pause/resume/isPaused methods, but those aren't exposed by most libraries
+                    // (undici/node-fetch/urrlib/axios/...).  So instead of pausing the response instance from calling our data handler,
+                    // we will instead stop reading chunks from that response instance.  Note that we will do this by calling the 'sleep'
+                    // function, and not by stopping the loop to read chunks.  Because when the loop is stopped, then Axios will abort
+                    // the active response stream completely...
+                    node.isPaused = true;
+                }                            
+                
+                return;
+            }
+
+            // Caution: node.activeResponse.body.resume() doesn't work since node-fetch hasn't implemented it
+            if (msg.hasOwnProperty("resume") && msg.resume === true) {
+                if (!node.activeResponse) {
+                    // No response body stream active, i.e. no connection to the sender
+                    node.warn("There is no stream active");
+                }
+                else if (!node.isPaused) {
+                    node.warn("The active stream is already running");
+                }
+                else {
+                    debugLog("Resume stream (set isPaused=false)");
+                    // Resume the stream by stopping to sleep, which means our loop will read chunks again from the response stream.
+                    node.isPaused = false;
+                }                            
+                
+                return;
+            }
             
-            node.status({fill:"blue",shape:"dot",text:"requesting"});
-                        
+            // If a previous request is still busy (endless) streaming, then stop it (undependent whether msg.stop exists or not)
+            if (node.activeResponse) {
+                stopCurrentResponseStream();
+            }
+            
+            if (msg.hasOwnProperty("stop") && msg.stop === true) {
+                node.statusUpdated = true;
+
+                // When returning, the previous stream has been aborted (above) and no new stream will be started (below).
+                return;
+            }
+                   
             // When no url has been specified in the node config, the 'url' value in the input message will be used
             var url = node.url || msg.url;
             
@@ -159,57 +522,9 @@ module.exports = function(RED) {
             if (url && url.indexOf("{{") >= 0) {
                 url = mustache.render(node.url,msg);
             }
-            
-            if (msg.hasOwnProperty("pause") && msg.pause === true) {
-                if (node.prevRes) {
-                    if (node.prevRes.isPaused() === true) {
-                        node.warn("Useless to send msg.pause when the active stream is already paused");   
-                    }
-                    else {
-                        node.prevRes.pause();
-                        node.status({fill:"orange",shape:"ring",text:"paused"});
-                    }
-                }     
-                else {
-                    node.warn("Useless to send msg.pauze when no stream is active");
-                }                        
-                
-                return;
-            }
-            
-            if (msg.hasOwnProperty("resume") && msg.resume === true) {
-                if (node.prevRes) {
-                    if (node.prevRes.isPaused() === false) {
-                        node.warn("Useless to send msg.resume when the active stream is not paused");   
-                    }
-                    else {
-                        node.prevRes.resume();
-                    }
-                }     
-                else {
-                    node.warn("Useless to send msg.resume when no stream is active");
-                }                        
-                
-                return;
-            }
-                                    
-            // If a previous request is still busy (endless) streaming, then stop it (undependent whether msg.stop exists or not)
-            if (node.prevReq) {
-                node.prevReq.abort();
-                node.prevReq = null;
-                node.prevRes = null;
-            }
-            
-            if (msg.hasOwnProperty("stop") && msg.stop === true) {
-                node.statusUpdated = true;
-                
-                node.status({fill:"blue",shape:"dot",text:"stopped"});
-                // When returning, the previous stream has been aborted (above) and no new stream will be started (below).
-                return;
-            }
-            
+
             if (!url) {
-                node.error(RED._("No url specified"),msg);
+                node.error("No url specified", msg);
                 node.status({fill:"red",shape:"dot",text:"no url"});
                 node.statusUpdated = true;
                 return;
@@ -223,472 +538,236 @@ module.exports = function(RED) {
                     url = "http://"+url;
                 }
             }
+ 
+            // When a timeout has been specified in the settings file, we should take that into account
+            if (RED.settings.httpRequestTimeout) { 
+                this.reqTimeout = parseInt(RED.settings.httpRequestTimeout) || 120000; 
+            }
+            else { 
+                this.reqTimeout = 120000; 
+            }
             
-            var opts = urllib.parse(url);
-            opts.method = 'GET';
-            opts.headers = {};
+            var fetchOptions = {};
+            fetchOptions.method = 'GET';
+            fetchOptions.headers = {};
 
             if (msg.headers) {
                 for (var v in msg.headers) {
                     if (msg.headers.hasOwnProperty(v)) {
                         var name = v.toLowerCase();
-                        opts.headers[name] = msg.headers[v];
+                        fetchOptions.headers[name] = msg.headers[v];
                     }
                 }
             }
-            if (this.credentials && this.credentials.user) {
-                opts.auth = this.credentials.user+":"+(this.credentials.password||"");
-            }
-            var payload = null;
 
-            var urltotest = url;
-            var noproxy;
-            if (noprox) {
-                for (var i in noprox) {
-                    if (url.indexOf(noprox[i]) !== -1) { noproxy=true; }
-                }
-            }
-            if (prox && !noproxy) {
-                var match = prox.match(/^(http:\/\/)?(.+)?:([0-9]+)?/i);
-                if (match) {
-                    opts.headers['Host'] = opts.host;
-                    var heads = opts.headers;
-                    var path = opts.pathname = opts.href;
-                    opts = urllib.parse(prox);
-                    opts.path = opts.pathname = path;
-                    opts.headers = heads;
-                    opts.method = method;
-                    urltotest = match[0];
-                }
-                else { node.warn("Bad proxy url: " + process.env.http_proxy); }
-            }
-            
             if (tlsNode) {
-                tlsNode.addTLSOptions(opts);
+                tlsNode.addTLSOptions(fetchOptions);
             }
-            
-            // TODO
+
             //var chunkSize = 30;
-            //opts.highWaterMark = chunkSize;
+            //fetchOptions.highWaterMark = chunkSize;
             
+            node.status({fill:"blue",shape:"dot",text:"requesting"});
+            
+            var requestOptions = {
+                insecureHTTPParser: true, // https://github.com/nodejs/node/issues/43798#issuecomment-1183584013
+                responseType: 'stream'
+            }
+
             // Send the http request to the client, which should respond with a http stream
-            node.prevReq = ((/^https/.test(urltotest))?https:http).request(opts,function(res) {  
-                var searchString = "";
-                var chunks = Buffers();
-                var searchIndex = -1;
-                var contentLength = 0;
-                var partHeadersObject = {};
-                var problemDetected = false;
-                var blockParts = [];
-                var part = null;
+            try {
+                switch(node.authentication) {
+                    case "basic":
+                        requestOptions.auth = {
+                            username: node.credentials.user,
+                            password: node.credentials.password
+                        }
+                        
+                        node.activeResponse = await axios.get(url, requestOptions).catch(err => {
+                            throw(err);
+                        });
+                        break;
+                    case "bearer":
+                        // TODO this is not available in the config screen yet...
+                        requestOptions.headers = {Authorization: `Bearer ${node.credentials.token}`};
+                        
+                        node.activeResponse = await axios.get(url, requestOptions);
+                        break;
+                    case "digest":
+                        const digestAuth = new AxiosDigestAuth.default({
+                            username: node.credentials.user,
+                            password: node.credentials.password
+                        });
+                        
+                        requestOptions.url = url;
+                        requestOptions.method = "GET";
+
+                        node.activeResponse = await digestAuth.request(requestOptions).catch(err => {
+                            throw(err);
+                        });
+                        break;
+                    default: // case 'none'
+                        node.activeResponse = await axios.get(url, requestOptions);
+                        break;
+                }
+            }
+            catch(err) {
+                debugLog("Error while sending request: " + err);
+                node.error(err.message,msg);
                 
-                // Force NodeJs to return a Buffer (instead of a string): See https://github.com/nodejs/node/issues/6038
-                res.setEncoding(null);
-                delete res._readableState.decoder;
-              
-                msg.statusCode = res.statusCode;
-                msg.statusMessage = res.statusMessage;
-                msg.headers = res.headers;
-                msg.responseUrl = res.responseUrl;
-                msg.payload = [];
+                msg.payload = err.message
                 
-                node.prevRes = res;
+                // When things go wrong in the request handling, there will be even no response instance...
+                if (err.response) {
+                    msg.statusCode = err.response.status;
+                    msg.statusMessage = err.response.statusText;
+                    msg.responseUrl = err.response.config.url;
+                }
+                else {
+                    msg.statusCode = null;
+                    msg.statusMessage = null;
+                    msg.responseUrl = null;
+                }
+
+                node.send([null, msg]);
+                node.status({fill:"red",shape:"ring",text:err.code});
+                
+                stopCurrentResponseStream();
+                node.statusUpdated = false;
+                
+                return;
+            }
+  
+            // Force NodeJs to return a Buffer (instead of a string): See https://github.com/nodejs/node/issues/6038
+            //node.activeResponse.setEncoding(null);
+            //delete node.activeResponse._readableState.decoder;
+                  
+            msg.statusCode = node.activeResponse.status;
+            msg.statusMessage = node.activeResponse.statusText;
+            msg.headers = node.activeResponse.headers;
+            msg.responseUrl = node.activeResponse.config.url;
+            msg.payload = [];
+
+            node.activeResponse.data.on('end', () => {
+                debugLog("Stream end event");
  
-                // msg.url = url;   // revert when warning above finally removed
+                if(node.boundary) {
+                    // If streaming is interrupted, the last part might not be complete: skip sendOutputMessage...
+                    
+                    // Reset the status (to remove the 'streaming' status).
+                    // Except when the nodes is being stopped manually, otherwise the 'stopped' status will be overwritten
+                    if (!node.statusUpdated) {
+                        node.status({});
+                    }
+                }
+                else {
+                    // Let's handle all remaining data...
+                    
+                    // Convert the Buffers list to a single NodeJs buffer, that can be understood by the Node-Red flow
+                    var part = node.chunks.splice(0, node.chunks.length).toBuffer();
+                                                    
+                    // Store the data in the block array
+                    node.blockParts.push(part);
+                            
+                    // Clone the msg (without payload for speed)
+                    var newMsg = RED.util.cloneMessage(msg);
+
+                    // Set the part headers as JSON object in the output message
+                    newMsg.content = node.partHeadersObject;
+                                                         
+                    newMsg.payload = node.blockParts;
+                            
+                    // Send the latest part on the output port
+                    sendOutputMessage(newMsg, node.boundary, 0);
+                }
+                node.statusUpdated = false;
+            })
+//TODO timeouts opvangen
+            // Not only a request can fail, but also a response can fail.
+            // See https://github.com/bartbutenaers/node-red-contrib-multipart-stream-decoder/issues/4
+            node.activeResponse.data.on('error', (err) => {
                 
-                // See multipart protocol explanation: https://www.w3.org/Protocols/rfc1341/7_2_Multipart.html
-                res.on('data',function(chunk) {
-                    var next = "";
-                    var pos = {};
-                    
-                    if (!Buffer.isBuffer(chunk)) {
-                        // If the 'setEncoding(null)' fix above doesn't work anymore in a future Node.js release, make sure we notice that.
-                        throw new Error("HTTP Request data chunk not a Buffer");
-                    }
-                    
-                    if (chunks.length > node.maximum) {
-                        // Avoid keeping searching endless (e.g. for boundary, eol, ...), and consuming all memory
-                        node.error("Chunked data length (" + chunks.length + ") exceeds the maximum (" + node.maximum + ")",msg);
-                        node.status({fill:"red",shape:"ring",text:"Max length exceeded"});
-                        node.statusUpdated = true;
-                        node.prevReq.abort();
-                        return;
-                    }
-                            
-                    // Make sure we only search through the new chunk, since we might have been searching through the previous chunks already.
-                    // When the searchString contains 'abcdefg', make sure you also search part of in the previous chunks (because the end of 
-                    // the previous chunk could contain 'abcdef', while the last 'g' is in the new chunk).
-                    // Remark: be aware that there might be not enough previous data available (i.e. size shorter than searchString) => minimum 0
-                    var offset = Math.max(0, chunks.length - searchString.length + 2);
-                    
-                    // When starting with a new chunk one or more previous chunks could be already available, when the current part 
-                    // is splitted across multiple chunks.  Indeed data is splitted into chunks by the NodeJs, undependent of the content.
-                    // Since concatenating buffers is bad for performance, we will store the individual buffers in a list.  The Buffers
-                    // package allows us to treat the multiple buffers as a single buffer (e.g. searching a pattern across buffers).
-                    // These chunks can be very long, but also very short...
-                    chunks.push(chunk);
-                    
-                    // When there is a problem getting the data over http, we will stop streaming and start collecting the entire error content
-                    if (res.statusCode < 200 || res.statusCode > 299) {
-                        // As soon as the problem is detected, clear (once) all previous data from the chunks.
-                        if (!problemDetected) {
-                            chunks.splice(0, chunks.length - chunk.length);
-                            partHeadersObject = {};
-                            problemDetected = true;
-                        }
-                        
-                        // Skip streaming
-                        return;
-                    }
                 
-                    // -----------------------------------------------------------------------------------------
-                    // Parsing global headers (at the start of the stream) :
-                    //  - Automatically check whether multipart streaming is required 
-                    //  - Determine which boundary text is going to be used during streaming
-                    // -----------------------------------------------------------------------------------------
-                    if (!boundary) {
-                        var contentType = this.headers['content-type'];
-                        
-                        if (!/multipart/.test(contentType)) {
-                            node.error("A multipart stream should start with content-type containing 'multipart'",msg);
-                            node.status({fill:"red",shape:"ring",text:"no multipart url"});
-                            node.statusUpdated = true;
-                            node.prevReq.abort();
-                            return;                        
-                        }
-                            
-                        // Automatically detect the required boundary (that will be used between parts of the stream).
-                        // Remark: unwanted whitespaces should be ignored (\s*).                        
-                        boundary = (contentType.match(/.*;\s*boundary=(.*)/) || [null, null])[1];
-
-                        if(!boundary) {
-                            boundary = 'error';
-                            node.status({fill:"red",shape:"ring",text:"no boundary"});
-                            node.statusUpdated = true;
-                            node.prevReq.abort();
-                            return;
-                        }
-                        
-                        // A boundary might contain colon's (:), for example "gc0p4Jq0M:2Yt08jU534c0p" to indicate that it consists out of multiple parts. 
-                        // And that each of those parts is syntactically identical to an RFC 822 message, except that the header area might be completely 
-                        // empty.  Such boundaries must be specified in the global header between quotations marks ("..."), which must be removed here.
-                        boundary = boundary.trim();
-                        boundary.replace('"', '');
-
-                        // A boundary needs to start with -- (even if -- is absent in the http header)
-                        if (!boundary.startsWith('--')) {
-                            boundary = '--' + boundary;
-                        }
-                        
-                        // The boundary should arrive at the start of the stream, so let's start searching for it.
-                        // Remark: we will look for boundary string (instead of the eol that should be available before the boundary),
-                        // because the protocol allows also eol's in the part body !!
-                        searchString = boundary;                
-                    }
-                    
-                    if (boundary === 'error') {
-                        // Make sure no data chunks are being processed, since we don't know which boundary we will have to search.
-                        // Otherwise chunks will be collected into memory, until memory is full ...
-                         return;                        
-                    }
-                    
-                    // -----------------------------------------------------------------------------------------
-                    // End-of-line (EOL determination).
-                    //
-                    // The EOL sequence is required for parsing, and can have one of the following values:
-                    // - LF   = linefeed ( \n ) // EOL for Unix and Linux and Macintosh (Mac OSX) systems
-                    // - CR   = carriage return ( \r ) for old Macintosh systems
-                    // - CRLF = carriage return linefeed ( \r\n ) for Windows systems
-                    //  
-                    // Debugging tip: \r = ASCII character 13 and \n = ASCII character 10
-                    // -----------------------------------------------------------------------------------------
-                    if(!eol) {
-                        // Try to find the first boundary in the stream
-                        searchIndex = chunks.indexOf(boundary, 0);
-                        
-                        if (searchIndex == -1) {
-                            // The received chunks don't contain the boundary yet, so try again when the next chunk arrives ...
-                            return;
-                        }
-                            
-                        // The sender can (optionally) send a preambule before the first boundary.  That is explanatory note for non-MIME 
-                        // conformant readers, which should be skipped !
-                        chunks.splice(0, searchIndex);
-                        
-                        // We will investigate the 2 (first non-empty) bytes after the boundary, which should contain the EOL (which is 1 or 2 bytes long).
-                        // Notice that spaces might be available between the eol and the boundary.
-                        for (var i = boundary.length; i < chunks.length; i++) {
-                            next = chunks.get(i);
-                           
-                            // Skip all the whitespaces, and then select the next two bytes (or one byte if we reached the end of the current chunk)
-                            if (next != ' ') {
-                                eol = chunks.slice(i, i + 2).toString();
-                                break;
-                            }
-                        }
-                            
-                        if (eol.length < 2) {
-                            // When we haven't found two (non-empty) bytes yet, let's start all over again when the next chunk arrives.
-                            eol = "";
-                            return;
-                        }
-                        
-                        if (eol.charAt(0) !== '\r' && eol.charAt(0) !== '\n') {
-                            eol = 'error';
-                            node.error("Invalid EOL (" + eol + ") found",msg);
-                            node.status({fill:"red",shape:"ring",text:"invalid eol"});
-                            node.statusUpdated = true;
-                            node.prevReq.abort();
-                            return;
-                        }
-                        
-                        if (eol.charAt(1) !== '\r' && eol.charAt(1) !== '\n') {
-                            eol = eol.charAt(0);
-                        }
-                        
-                        // Now everything is ready to start the stream.  Currently a number of slices could already have been received (during
-                        // boundary and EOL detection).  Make sure the stream startup starts from the beginning of the stream.
-                        offset = 0;
-                    }
-                    
-                    if(eol === 'error') {
-                        //node.error("Ignoring received data, since no EOL could be found",msg);
-                        return;
-                    }
-
-                    // -----------------------------------------------------------------------------------------
-                    // Stream the data in the newly arrived chunk
-                    // -----------------------------------------------------------------------------------------
-                    
-                    if(searchString === 'error') {
-                        //node.error("Ignoring received data, since the part data has been exceeded",msg);
-                        return;
-                    }
-                    
-                    // Let's loop, since a single (large) data chunk could contain multiple (short) parts
-                    while (true) { 
-                        searchIndex = -1;
-                    
-                        // The boundary search can be skipped, if the content length is specified in the stream (in the part headers).
-                        // Indeed it is much faster to simply get the N specified bytes, instead of searching for the boundary through all the chunk data...
-                        // Remark: for the first part the boundary will always be searched using indexof, but for the next parts the contentLength will be used.
-                        if (searchString === boundary && contentLength > 0) {                               
-                            if (chunks.length < contentLength + boundary.length) {
-                                // We have not received enough chunk data yet (i.e. less than the required contentLenght), so we didn't found the boundary yet
-                                searchIndex = -1;
-                            }
-                            else {
-                                // Based on the content length, determine where the boundary will be located (in the chunk data)
-                                searchIndex = contentLength;
-                            }
-                        }
-                        else {                          
-                            // Search for the specified string in the received chunk data (which will use lot's of CPU for large data chunks)
-                            searchIndex = chunks.indexOf(searchString, offset);                          
-                        }
-                        
-                        // Make sure the offset is not used afterwards (during processing of the 'same' new data chunk)
-                        offset = 0;
-
-                        if (searchIndex < 0) { 
-                            // Since we didn't find our searchString in the received chunks, we will have to wait until the next chunk arrives
-                            return;
-                        }                      
-                        
-                        // When a boundary has been found, this means that both the part headers and part body have been found.
-                        // Store all this part information in a single message, and send it to the output port.
-                        if (searchString === boundary) {
-                            // Useless to send an empty message when the boundary is found at index 0 (probably at the start of the stream)
-                            if (searchIndex > 0) {
-                                // Seems a part body has been found ...
-                                
-                                // Convert the Buffers list to a single NodeJs buffer, that can be understood by the Node-Red flow
-                                var part = chunks.splice(0, searchIndex).toBuffer();
-                                
-                                // Store the part in the block array
-                                blockParts.push(part);
-                                part = null;
-                                
-                                // Only send a message when the block contains the required number of parts
-                                if (blockParts.length == node.blockSize) {
-                                    // Clone the msg (without payload for speed)
-                                    var newMsg = RED.util.cloneMessage(msg);
-
-                                    // Set the part headers as JSON object in the output message
-                                    newMsg.content = partHeadersObject;
-                                                                         
-                                    newMsg.payload = blockParts;
-                                    
-                                    handleMsg(newMsg, boundary, preRequestTimestamp,currentStatus, contentLength);
-                                    
-                                    // Start with a new empty block
-                                    blockParts = [];
-                                }
-                                
-                                // If a (non-zero) throttling delay is specified, the upload should be pauzed during that delay period.
-                                // If the message contains a throttling delay, it will be used if the node has no throttling delay.
-                                var delay = (node.delay && node.delay > 0) ? node.delay : msg.delay;
-                                if (delay && delay !== 0) {
-                                    res.pause();
-                                    setTimeout(function () {
-                                        res.resume();
-                                    }, delay);
-                                }
-                            }                               
-                        }
-                        else { // When the header-body-separator has been found, this means that the part headers have been found...  
-                            partHeadersObject = {};
-                            contentLength = 0;
-                            
-                            // Convert the part headers to a JSON object (for the output message later on)
-                            chunks.splice(0, searchIndex).toString('utf8').trim().split(eol).forEach(function(entry) {
-                                var entryArray = entry.split(":");
-                                if (entryArray.length == 2) {
-                                    // Convert all the string values to primitives (boolean, number, ...)
-                                    var name = entryArray[0].trim();
-                                    var value = autoParse(entryArray[1].trim());   
-                                    partHeadersObject[name] = value;
-                                    
-                                    // Try to find the content-length header variable, which is optional
-                                    if (name.toLowerCase() == 'content-length') {
-                                        if (isNaN(value)) {
-                                            // Don't return because we simply ignore the content-length (i.e. search afterwards the 
-                                            // boundary through the data chunks).
-                                            node.warn("The content-length is not numeric");
-                                        }
-                                        else {
-                                            contentLength = value;
-                                        }
-                                    }
-                                }
-                            });
-                        }  
-
-                        // Also remove the searchString, since that is not needed anymore.
-                        chunks.splice(0, searchString.length);
-                        
-                        // Switch to the other search string, for our next search ...
-                        if (searchString === boundary) {                            
-                            // Boundary found, so from here on we will try to find a header-body-separator
-                            // The header-body-separator consists out of TWO EOL sequences !!!!
-                            searchString = eol + eol; 
-                        }
-                        else {
-                            // The header-body-separator has been found, so from here on we will try to find a boundary
-                            searchString = boundary;
-                        }
-                    }
-                });
-                res.on('end',function() {
-                    if(boundary) {
-                        // If streaming is interrupted, the last part might not be complete: skip handleMsg...
-                        
-                        // Reset the status (to remove the 'streaming' status).
-                        // Except when the nodes is being stopped manually, otherwise the 'stopped' status will be overwritten
-                        if (!node.statusUpdated) {
-                            node.status({});
-                        }
-                    }
-                    else {
-                        // Let's handle all remaining data...
-                        
-                        // Convert the Buffers list to a single NodeJs buffer, that can be understood by the Node-Red flow
-                        var part = chunks.splice(0, chunks.length).toBuffer();
-                                                        
-                        // Store the data in the block array
-                        blockParts.push(part);
-                                
-                        // Clone the msg (without payload for speed)
-                        var newMsg = RED.util.cloneMessage(msg);
-
-                        // Set the part headers as JSON object in the output message
-                        newMsg.content = partHeadersObject;
-                                                             
-                        newMsg.payload = blockParts;
-                                
-                        // Send the latest part on the output port
-                        handleMsg(newMsg, boundary, preRequestTimestamp, currentStatus, 0);
-                    }
-                    node.statusUpdated = false;
-                });
-                // Version 0.0.4: Not only a request can fail, but also a response can fail.
-                // See https://github.com/bartbutenaers/node-red-contrib-multipart-stream-decoder/issues/4
-                res.on('error',function(err) {
+                if (err.message === "aborted") {
+                    debugLog("Stream aborted event");
+                    node.status({fill:"blue",shape:"dot",text:"stopped"});
+                }
+                else {
+                    debugLog("Stream error event: " + err);
                     node.error(err,msg);
                     msg.payload = err.toString() + " : " + url;
-                    
-                    if (node.prevReq) {
-                        msg.statusCode = node.prevReq.statusCode;
-                        msg.statusMessage = node.prevReq.statusMessage;
+
+                    if (node.activeResponse) {
+                        msg.statusCode = node.activeResponse.statusCode;
+                        msg.statusMessage = node.activeResponse.statusMessage;
                     }
                     else {
                         msg.statusCode = 400;
                     }
-                    
-                    node.send(msg);
+
                     node.status({fill:"red",shape:"ring",text:err.code});
-                    
-                    if (node.prevReq) {
-                        node.prevReq.abort();
-                    }
-                    
-                    node.prevReq = null;
-                    node.prevRes = null;
+
+                    node.send([null, msg]);
+
                     node.statusUpdated = false;
-                });
-            });
-            node.prevReq.setTimeout(node.reqTimeout, function() {
-                node.error(RED._("server not responding"),msg);
-                msg.payload = "Error: server not responding : " + url;
-                
-                setTimeout(function() {
-                    node.status({fill:"red",shape:"ring",text:"server not responding"});
-                    node.statusUpdated = true;
-                },10);
-                
-                if (node.prevReq) {
-                    node.prevReq.abort();
                 }
+            })
+
+            // Run a check every second
+            debugLog("Timeout check interval started");
+            node.timeoutCheck = setInterval(function() {
+                var now = Date.now();
+                var duration = now - node.timestampLastChunk;
                 
-                node.send(msg);
-                node.status({fill:"red",shape:"ring",text:"timeout"});
-                
-                node.prevReq = null;
-                node.prevRes = null;
-                node.statusUpdated = false;
-            });
-            node.prevReq.on('error',function(err) {
-                node.error(err,msg);
-                msg.payload = err.toString() + " : " + url;
-                
-                if (node.prevReq) {
-                    msg.statusCode = node.prevReq.statusCode;
-                    msg.statusMessage = node.prevReq.statusMessage;
+                // If no chunk has arrived during the specified timeout period, then abort the stream
+                if(duration > node.reqTimeout) {
+                    debugLog("Timeout occured after " + duration + " msecs (now=" + now.toUTCString() + " & timestampLastChunk=" + node.timestampLastChunk.toUTCString() + ")");
+                    node.timeoutOccured = true;
+                    // Among others, the clearInterval will also happen in the stopCurrentResponseStream
+                    stopCurrentResponseStream();
+                }
+            }, 1000);
+
+            /* TODO not sure anymore why this has been added
+            if (payload) {
+                node.activeRequest.write(payload);
+            }
+            */
+            
+            // Reset all the parameters required for a new stream (just before we start reading from the new active response stream)
+            node.searchString = "";
+            node.chunks = Buffers();
+            node.searchIndex = -1;
+            node.contentLength = 0;
+            node.partHeadersObject = {};
+            node.problemDetected = false;
+            node.blockParts = [];
+            node.boundary = "";
+            node.eol = "";
+            node.currentStatus = {timestamp:0, value:'{}'};
+
+            // Once the new active response is readable, start reading chunks from it.
+            // Note that node.activeResponse.data is a readable stream.
+            debugLog("Start reading chunks from the response stream");
+            for await (const chunk of node.activeResponse.data){
+                if (!node.activeResponse) {
+                    debugLog("Stop reading chunks from the response stream (because activeResponse is null)");
+                    // Seems that stopCurrentResponseStream has been called, so let's stop reading chunks from the active response.
+                    // As soon as this loop is being stopped, Axios will abort the stream...
+                    break;
                 }
                 else {
-                    msg.statusCode = 400;
+                    await handleChunk(chunk, msg);
                 }
-                
-                node.send(msg);
-                node.status({fill:"red",shape:"ring",text:err.code});
-                
-                node.prevReq = null;
-                node.prevRes = null;
-                node.statusUpdated = false;
-            });
-            if (payload) {
-                node.prevReq.write(payload);
             }
-            node.prevReq.end();
+
         });
 
         this.on("close",function() {
-            if (node.prevReq) {
-                // At (re)deploy make sure the streaming is closed, otherwise e.g. it keeps sending data across already (visually) removed wires
-                node.prevReq.abort();
-                node.prevReq = null;
-                node.prevRes = null;
-            }
+            debugLog("Node close event called");
+            
+            // At (re)deploy make sure the streaming is closed, otherwise e.g. it keeps sending data across already (visually) removed wires
+            stopCurrentResponseStream();
             
             node.status({});
         });
