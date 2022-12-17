@@ -37,17 +37,19 @@ module.exports = function(RED) {
     // ...
     function MultiPartDecoder(n) {
         RED.nodes.createNode(this,n);
-        this.delay                  = n.delay;
-        this.url                    = n.url;
-        this.authentication         = n.authentication;
-        this.ret                    = n.ret || "txt";
-        this.maximum                = n.maximum;
-        this.blockSize              = n.blockSize || 1;
-        this.activeResponse         = null;
-        this.isPaused               = false;
-        this.statusUpdated          = false;
-        this.timeoutOccured         = false;
-        this.timestampLastChunk     = 0;
+        this.delay              = n.delay;
+        this.url                = n.url;
+        this.authentication     = n.authentication;
+        this.ret                = n.ret || "txt";
+        this.maximum            = n.maximum;
+        this.blockSize          = n.blockSize || 1;
+        this.enableLog          = n.enableLog || "off";
+        this.activeResponse     = null;
+        this.isPaused           = false;
+        this.statusUpdated      = false;
+        this.timeoutOccured     = false;
+        this.timestampLastChunk = 0;
+        this.timeoutCheck       = null;
 
         var node = this;
 
@@ -59,6 +61,12 @@ module.exports = function(RED) {
             return new Promise(resolve => setTimeout(resolve, milliseconds));
         } 
 
+        function debugLog(text) {
+            if (node.enableLog === "on") {
+                console.log("MULTIPART STREAM : " + text);
+            }
+        }
+        
         async function handleChunk(chunk, msg) {
             var next = "";
             var pos = {};
@@ -291,10 +299,14 @@ module.exports = function(RED) {
                         }
                         
                         if (node.isPaused) {
+                            node.status({fill:"blue",shape:"dot",text:"paused"});
+                            
                             // Check every second if the stream still needs to stay paused
                             while (node.isPaused) {
                                 await sleep(1000);
                             }
+                            
+                            debugLog("The pause loop has been ended (because isPaused is false)");
                         }
                         else {
                             // If a (non-zero) throttling delay is specified, the upload should be pauzed during that delay period.
@@ -302,9 +314,10 @@ module.exports = function(RED) {
                             var delay = parseInt((node.delay && node.delay > 0) ? node.delay : msg.delay);
                             if (delay && delay !== 0) {
                                 await sleep(delay);
+                                //debugLog("The throttling delay has ended after " + delay + " msecs");
                             }
                         }
-                    }                               
+                    }
                 }
                 else { // When the header-body-separator has been found, this means that the part headers have been found...  
                     node.partHeadersObject = {};
@@ -352,17 +365,26 @@ module.exports = function(RED) {
 
         function stopCurrentResponseStream() {
             // Quit the pause (sleep) loop
-            node.isPaused = false;
+            if (node.isPaused) {
+                debugLog("Request to stop pausing (isPaused = false)");
+                node.isPaused = false;
+            }
             
             // Quit the loop that reads continiously chunks from the response stream
-            node.activeResponse = null;
-            
-            node.status({fill:"blue",shape:"dot",text:"stopped"});
+            if (node.activeResponse) {
+                debugLog("Request to stop reading chunks (activeResponse=null)");
+                node.activeResponse = null;
+            }
             
             if(node.timeoutCheck) {
                 clearInterval(node.timeoutCheck);
                 node.timeoutCheck = null;
+                debugLog("Timeout check interval stopped");
             }
+            
+
+            
+            node.status({fill:"blue",shape:"dot",text:"stopped"});
         }
 
         function sendOutputMessage(msg, boundary, contentLength) {
@@ -440,8 +462,6 @@ module.exports = function(RED) {
         // - searchIndex
         // - searchString
         this.on("input", async function(msg) {
-            node.status({fill:"blue",shape:"dot",text:"requesting"});
-
             // Caution: node.activeResponse.body.pause() doesn't work since node-fetch hasn't implemented it
             if (msg.hasOwnProperty("pause") && msg.pause === true) {
                 if (!node.activeResponse) {
@@ -452,6 +472,7 @@ module.exports = function(RED) {
                     node.warn("The active stream is already paused");
                 }
                 else {
+                    debugLog("Pause stream (set isPaused=true)");
                     // Pause the stream by starting to sleep (infinite long), i.e. by stopping to read chunks from the active stream.
                     // The original NodeJs response instance has pause/resume/isPaused methods, but those aren't exposed by most libraries
                     // (undici/node-fetch/urrlib/axios/...).  So instead of pausing the response instance from calling our data handler,
@@ -474,6 +495,7 @@ module.exports = function(RED) {
                     node.warn("The active stream is already running");
                 }
                 else {
+                    debugLog("Resume stream (set isPaused=false)");
                     // Resume the stream by stopping to sleep, which means our loop will read chunks again from the response stream.
                     node.isPaused = false;
                 }                            
@@ -482,7 +504,9 @@ module.exports = function(RED) {
             }
             
             // If a previous request is still busy (endless) streaming, then stop it (undependent whether msg.stop exists or not)
-            stopCurrentResponseStream();
+            if (node.activeResponse) {
+                stopCurrentResponseStream();
+            }
             
             if (msg.hasOwnProperty("stop") && msg.stop === true) {
                 node.statusUpdated = true;
@@ -543,67 +567,67 @@ module.exports = function(RED) {
             //var chunkSize = 30;
             //fetchOptions.highWaterMark = chunkSize;
             
-            // Reset all the parameters required for a new stream
-            node.searchString = "";
-            node.chunks = Buffers();
-            node.searchIndex = -1;
-            node.contentLength = 0;
-            node.partHeadersObject = {};
-            node.problemDetected = false;
-            node.blockParts = [];
-            node.boundary = "";
-            node.eol = "";
-            node.currentStatus = {timestamp:0, value:'{}'};
+            node.status({fill:"blue",shape:"dot",text:"requesting"});
+            
+            var requestOptions = {
+                insecureHTTPParser: true, // https://github.com/nodejs/node/issues/43798#issuecomment-1183584013
+                responseType: 'stream'
+            }
 
             // Send the http request to the client, which should respond with a http stream
             try {
                 switch(node.authentication) {
                     case "basic":
-                        node.activeResponse = await axios.get(url, {
-                            auth: {
-                                username: node.credentials.user,
-                                password: node.credentials.password
-                            },
-                            responseType: 'stream'
-                        }).catch(err => {
+                        requestOptions.auth = {
+                            username: node.credentials.user,
+                            password: node.credentials.password
+                        }
+                        
+                        node.activeResponse = await axios.get(url, requestOptions).catch(err => {
                             throw(err);
                         });
                         break;
                     case "bearer":
                         // TODO this is not available in the config screen yet...
-                        node.activeResponse = await axios.get(url, {
-                            headers: {Authorization: `Bearer ${node.credentials.token}`}, 
-                            responseType: 'stream'
-                        });
-
+                        requestOptions.headers = {Authorization: `Bearer ${node.credentials.token}`};
+                        
+                        node.activeResponse = await axios.get(url, requestOptions);
                         break;
                     case "digest":
                         const digestAuth = new AxiosDigestAuth.default({
                             username: node.credentials.user,
                             password: node.credentials.password
                         });
+                        
+                        requestOptions.url = url;
+                        requestOptions.method = "GET";
 
-                        node.activeResponse = await digestAuth.request({
-                            method: "GET",
-                            url: url,
-                            responseType: "stream"
-                        }).catch(err => {
+                        node.activeResponse = await digestAuth.request(requestOptions).catch(err => {
                             throw(err);
                         });
                         break;
                     default: // case 'none'
-                        node.activeResponse = await axios.get(url, {
-                            responseType: 'stream'
-                        });
+                        node.activeResponse = await axios.get(url, requestOptions);
                         break;
                 }
             }
             catch(err) {
+                debugLog("Error while sending request: " + err);
                 node.error(err.message,msg);
                 
                 msg.payload = err.message
-                msg.statusCode = err.response.status;
-                msg.statusMessage = err.response.statusText;
+                
+                // When things go wrong in the request handling, there will be even no response instance...
+                if (err.response) {
+                    msg.statusCode = err.response.status;
+                    msg.statusMessage = err.response.statusText;
+                    msg.responseUrl = err.response.config.url;
+                }
+                else {
+                    msg.statusCode = null;
+                    msg.statusMessage = null;
+                    msg.responseUrl = null;
+                }
 
                 node.send([null, msg]);
                 node.status({fill:"red",shape:"ring",text:err.code});
@@ -621,15 +645,12 @@ module.exports = function(RED) {
             msg.statusCode = node.activeResponse.status;
             msg.statusMessage = node.activeResponse.statusText;
             msg.headers = node.activeResponse.headers;
-            //TODO msg.responseUrl = node.activeResponse.responseUrl;
+            msg.responseUrl = node.activeResponse.config.url;
             msg.payload = [];
 
             node.activeResponse.data.on('end', () => {
-                if(node.timeoutCheck) {
-                    clearInterval(node.timeoutCheck);
-                    node.timeoutCheck = null;
-                }
-                    
+                debugLog("Stream end event");
+ 
                 if(node.boundary) {
                     // If streaming is interrupted, the last part might not be complete: skip sendOutputMessage...
                     
@@ -665,10 +686,14 @@ module.exports = function(RED) {
             // Not only a request can fail, but also a response can fail.
             // See https://github.com/bartbutenaers/node-red-contrib-multipart-stream-decoder/issues/4
             node.activeResponse.data.on('error', (err) => {
+                
+                
                 if (err.message === "aborted") {
+                    debugLog("Stream aborted event");
                     node.status({fill:"blue",shape:"dot",text:"stopped"});
                 }
                 else {
+                    debugLog("Stream error event: " + err);
                     node.error(err,msg);
                     msg.payload = err.toString() + " : " + url;
 
@@ -689,10 +714,16 @@ module.exports = function(RED) {
             })
 
             // Run a check every second
+            debugLog("Timeout check interval started");
             node.timeoutCheck = setInterval(function() {
+                var now = Date.now();
+                var duration = now - node.timestampLastChunk;
+                
                 // If no chunk has arrived during the specified timeout period, then abort the stream
-                if(Date.now() - node.timestampLastChunk > node.reqTimeout) {
+                if(duration > node.reqTimeout) {
+                    debugLog("Timeout occured after " + duration + " msecs (now=" + now.toUTCString() + " & timestampLastChunk=" + node.timestampLastChunk.toUTCString() + ")");
                     node.timeoutOccured = true;
+                    // Among others, the clearInterval will also happen in the stopCurrentResponseStream
                     stopCurrentResponseStream();
                 }
             }, 1000);
@@ -702,11 +733,25 @@ module.exports = function(RED) {
                 node.activeRequest.write(payload);
             }
             */
+            
+            // Reset all the parameters required for a new stream (just before we start reading from the new active response stream)
+            node.searchString = "";
+            node.chunks = Buffers();
+            node.searchIndex = -1;
+            node.contentLength = 0;
+            node.partHeadersObject = {};
+            node.problemDetected = false;
+            node.blockParts = [];
+            node.boundary = "";
+            node.eol = "";
+            node.currentStatus = {timestamp:0, value:'{}'};
 
             // Once the new active response is readable, start reading chunks from it.
             // Note that node.activeResponse.data is a readable stream.
+            debugLog("Start reading chunks from the response stream");
             for await (const chunk of node.activeResponse.data){
                 if (!node.activeResponse) {
+                    debugLog("Stop reading chunks from the response stream (because activeResponse is null)");
                     // Seems that stopCurrentResponseStream has been called, so let's stop reading chunks from the active response.
                     // As soon as this loop is being stopped, Axios will abort the stream...
                     break;
@@ -719,6 +764,8 @@ module.exports = function(RED) {
         });
 
         this.on("close",function() {
+            debugLog("Node close event called");
+            
             // At (re)deploy make sure the streaming is closed, otherwise e.g. it keeps sending data across already (visually) removed wires
             stopCurrentResponseStream();
             
