@@ -721,7 +721,7 @@ module.exports = function(RED) {
                 
                 // If no chunk has arrived during the specified timeout period, then abort the stream
                 if(duration > node.reqTimeout) {
-                    debugLog("Timeout occured after " + duration + " msecs (now=" + now.toUTCString() + " & timestampLastChunk=" + node.timestampLastChunk.toUTCString() + ")");
+                    debugLog("Timeout occured after " + duration + " msecs (now=" + now + " & timestampLastChunk=" + node.timestampLastChunk + ")");
                     node.timeoutOccured = true;
                     // Among others, the clearInterval will also happen in the stopCurrentResponseStream
                     stopCurrentResponseStream();
