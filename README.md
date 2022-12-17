@@ -4,12 +4,19 @@ Node-Red node for decoding multipart streams over http
 + Version ***0.0.2***: [Simon Hailes](https://github.com/btsimonh) has been testing version 0.0.1 thoroughly. 
 + Version ***1.0.0*** is a large refactoring of this node, to replace the obsolete [request](https://www.npmjs.com/package/request) library by [axios](https://www.npmjs.com/package/axios).  As a result, this node now supports ***digest authentication*** which is required by most of the modern IP cameras.
 
+Note: the example flows in this readme page use url's of free public camera's, to allow you to test this node without having to have an IP camera that offers an MJPEG stream.  The disadvantage of this approach is that public camera's are often shut down, and as a result the example flows don't work anymore.  In that case, you can easily find new public MJPEG streams to test, using my step-by-step tutorial in [this](https://github.com/bartbutenaers/node-red-contrib-multipart-stream-decoder/wiki/Find-a-public-mjpeg-stream-for-testing-flows) wiki page.
+
 ## Install
 
 Run the following npm command in your Node-RED user directory (typically ~/.node-red):
 ```
 npm install node-red-contrib-multipart-stream-decoder
 ```
+
+## Support my Node-RED developments
+Please buy my wife a coffee to keep her happy, while I am busy developing Node-RED stuff for you ...
+
+<a href="https://www.buymeacoffee.com/bartbutenaers" target="_blank"><img src="https://www.buymeacoffee.com/assets/img/custom_images/orange_img.png" alt="Buy my wife a coffee" style="height: 41px !important;width: 174px !important;box-shadow: 0px 3px 2px 0px rgba(190, 190, 190, 0.5) !important;-webkit-box-shadow: 0px 3px 2px 0px rgba(190, 190, 190, 0.5) !important;" ></a>
 
 ## Streaming basics
 
