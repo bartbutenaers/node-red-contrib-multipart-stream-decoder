@@ -12,6 +12,11 @@
 -->
 <script type="text/x-red" data-template-name="multipart-decoder">
     <div class="form-row">
+        <label for="node-input-name"><i class="fa fa-tag"></i> Name</label>
+        <input type="text" id="node-input-name" data-i18n="[placeholder]common.label.name">
+    </div>
+    </br>
+    <div class="form-row">
         <label for="node-input-url"><i class="fa fa-globe"></i> URL</label>
         <input id="node-input-url" type="text" placeholder="http://">
     </div>
@@ -23,7 +28,7 @@
         </div>
     </div>
     <div class="form-row">
-        <label for="node-input-authentication"><i class="fa fa-id-card-o"></i> Authentication</label>
+        <label for="node-input-authentication"><i class="fa fa-id-card-o"></i> Authenticate</label>
         <select type="text" id="node-input-authentication" style="width:70%;">
             <option value="none"> None</option>
             <option value="basic"> Basic</option>
@@ -59,37 +64,46 @@
         <input type="text" id="node-input-maximum">
     </div>    
     <div class="form-row">
-        <label for="node-input-name"><i class="fa fa-tag"></i> Name</label>
-        <input type="text" id="node-input-name" data-i18n="[placeholder]common.label.name">
+        <label for="node-input-enableLog"><i class="fa fa-eye"></i> Debug log</label>
+        <select type="text" id="node-input-enableLog" style="width:70%;">
+            <option value="on"> On</option>
+            <option value="off"> Off</option>
+        </select>
     </div>
-    <div class="form-tips" id="tip-json" hidden>Tip: If the JSON parse fails the fetched string is returned as-is</div>
 </script>
 
 <script type="text/x-red" data-help-name="multipart-decoder">
-    <p>Provides a node for requesting and decoding multipart http streams.</p>
-    <p>The <code>URL</code> is required except when it is specified in the input message via <code>msg.url</code>:</p>
-    <p>Such URL properties can contain <a href="http://mustache.github.io/mustache.5.html" target="_blank">mustache-style</a> tags. These allow the
+    <p>A Node-RED node for decoding multipart http streams.</p>
+    <p><strong>URL:</strong><br/>
+    The http(s) url (to a multipart resource) is required except when it is specified in the input message via <code>msg.url</code>.<br/>
+    That msg.url property can contain <a href="http://mustache.github.io/mustache.5.html" target="_blank">mustache-style</a> tags. These allow the
     url to be constructed using values of the incoming message. For example, if the url is set to
     <code>example.com/{{{topic}}}</code>, it will have the value of <code>msg.topic</code> automatically inserted.
     Using {{{...}}} prevents mustache from escaping characters like / & etc.</p>
-    <p>
-    The output message contains the following properties:
+    <p><strong>Authenticate:</strong><br/>
+    <p>Specify whether the url requires (basic or digest) authentication, and enter the credentials.</p>
+    <p><strong>Delay:</strong><br/>
+    The (minimum) number of milliseconds between parts in a multipart stream, to allow throttling the stream.</p>
+    <p><strong>Block size:</strong><br/>
+    The number of parts in the output <code>msg.payload</code>.  E.g. when set to value 3, the output <code>msg.payload</code> will contain an array of 3 parts.  When set to value 1, the output <code>msg.payload</code> will contain only 1 part (not an array containing 1 part!).</p>
+    <p>If you need to configure a proxy please add <b>http_proxy=...</b> to your environment variables and restart Node-RED.</p>
+    <p><strong>Max. size:</strong><br/>
+    The maximum total size of all messages that will be buffered.  When no boundary separator is found within these chunks, then the stream will automatically be aborted.</p>
+    <p><strong>Debug log:</strong><br/>
+    When enabled, some extra logs will appear in the console log, which can be used for troubleshooting.</p>
+    <p>The <strong>output message</strong> contains the following properties:
     <ul>
         <li><code>payload</code> is the body of the response</li>
         <li><code>statusCode</code> is the status code of the response, or the error code if the request could not be completed</li>
         <li><code>responseUrl</code> is the url of the server that responds</li>
         <li><code>content</code> contains the http headers of the current part</li>
-    </ul>
-    The input message can contain the following properties (apart from optional properties used for mustache expressions):
+    </ul></p>
+    <p>The <strong>input message</strong> can contain the following properties (apart from optional properties used for mustache expressions):
     <ul>
         <li><code>url</code> is required when the URL is not specified in the node.  Otherwise it will be ignored.</li>
         <li><code>stop</code> will stop the current stream if set to 'true' (which can be used if no new stream has to be started).</li>
         <li><code>delay</code> will be used to throttle the stream, if no delay has been specified in the node.</li>
-    </ul>
-    The <b>delay</b> is the (minimum) number of milliseconds between parts in a multipart stream, to allow throttling the stream.</p>
-    The <b>block size</b> is the number of parts in the output <code>msg.payload</code>.  E.g. when set to value 3, the output <code>msg.payload</code> will contain an array of 3 parts.  When set to value 1, the output <code>msg.payload</code> will contain only 1 part (not an array containing 1 part!).</p>
-    </br>
-    <p><b>Note</b>: If you need to configure a proxy please add <b>http_proxy=...</b> to your environment variables and restart Node-RED.</p>
+    </ul></p>
 </script>
 
 <script type="text/javascript">
@@ -105,6 +119,7 @@
             delay: {value:0, required: false, validate:function(value) { return !value || !isNaN(value); }},
             maximum: {value:1000000, required: true, validate:function(value) { return !value || !isNaN(value); }},
             blockSize: {value:1, required: false, validate:function(value) { return !value || !isNaN(value) || value<1; }},
+            enableLog: {value: "off"}
         },
         credentials: {
             user: {type:"text"},
@@ -112,6 +127,7 @@
         },
         inputs:1,
         outputs:2,
+        outputLabels: ["data/parts", "errors"],
         icon: "decoder.png",
         label: function() {
             return this.name || "multipart decoder";
@@ -120,8 +136,10 @@
             return this.name?"node_label_italic":"";
         },
         oneditprepare: function() {
-            // Set a default block size of 1 for existing nodes that don't have that field yet.
+            // Set default values for some properties that old nodes don't have these properties yet.
             $('#node-input-blockSize').val(this.blockSize || 1);
+            $('#node-input-authentication').val(this.authentication || ((this.useAuth) ? "basic" : "none"));
+            $('#node-input-enableLog').val(this.enableLog || "off");
   
             $("#node-input-authentication").change(function() {
                 if (this.value == "none") {
