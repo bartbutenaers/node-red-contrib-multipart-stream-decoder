@@ -370,19 +370,21 @@ module.exports = function(RED) {
                 node.isPaused = false;
             }
             
-            // Quit the loop that reads continiously chunks from the response stream
-            if (node.activeResponse) {
-                debugLog("Request to stop reading chunks (activeResponse=null)");
-                node.activeResponse = null;
-            }
-            
-            if(node.timeoutCheck) {
+            if (node.timeoutCheck) {
                 clearInterval(node.timeoutCheck);
                 node.timeoutCheck = null;
                 debugLog("Timeout check interval stopped");
             }
             
-
+            if (node.abortRequestController) {
+                // Cancel the active request, which will interrupt the loop which is reading chunks from the response.
+                // This is e.g. useful when messages are inject quickly to switch to another stream.
+                // There will be a request to stop reading chunks, but before the reading is stopped a new
+                // stream is started.  As a result two streams start pushing their images to this node 
+                // simultaneously.  Two streams storing their data in the same node properties (e.g blockParts)
+                // will end up in large distortions of the output images.
+                node.abortRequestController.abort();
+            }
             
             node.status({fill:"blue",shape:"dot",text:"stopped"});
         }
@@ -569,9 +571,12 @@ module.exports = function(RED) {
             
             node.status({fill:"blue",shape:"dot",text:"requesting"});
             
+            node.abortRequestController = new AbortController();
+            
             var requestOptions = {
                 insecureHTTPParser: true, // https://github.com/nodejs/node/issues/43798#issuecomment-1183584013
-                responseType: 'stream'
+                responseType: 'stream',
+                signal: node.abortRequestController.signal
             }
 
             // Send the http request to the client, which should respond with a http stream
@@ -583,9 +588,7 @@ module.exports = function(RED) {
                             password: node.credentials.password
                         }
                         
-                        node.activeResponse = await axios.get(url, requestOptions).catch(err => {
-                            throw(err);
-                        });
+                        node.activeResponse = await axios.get(url, requestOptions);
                         break;
                     case "bearer":
                         // TODO this is not available in the config screen yet...
@@ -602,9 +605,7 @@ module.exports = function(RED) {
                         requestOptions.url = url;
                         requestOptions.method = "GET";
 
-                        node.activeResponse = await digestAuth.request(requestOptions).catch(err => {
-                            throw(err);
-                        });
+                        node.activeResponse = await digestAuth.request(requestOptions);
                         break;
                     default: // case 'none'
                         node.activeResponse = await axios.get(url, requestOptions);
@@ -749,18 +750,20 @@ module.exports = function(RED) {
             // Once the new active response is readable, start reading chunks from it.
             // Note that node.activeResponse.data is a readable stream.
             debugLog("Start reading chunks from the response stream");
-            for await (const chunk of node.activeResponse.data){
-                if (!node.activeResponse) {
-                    debugLog("Stop reading chunks from the response stream (because activeResponse is null)");
-                    // Seems that stopCurrentResponseStream has been called, so let's stop reading chunks from the active response.
-                    // As soon as this loop is being stopped, Axios will abort the stream...
-                    break;
-                }
-                else {
+            try{
+                for await (const chunk of node.activeResponse.data){
                     await handleChunk(chunk, msg);
                 }
             }
-
+            catch(err) {
+                if (err.code === 'ERR_CANCELED') {
+                    // The abort controller will trigger this, after the loop has been interrupted (in this async task)
+                    debugLog("Stop reading chunks from the response stream (because the active response has been aborted)")
+                }
+                else {
+                    debugLog("Stop reading chunks from the response stream: " + err.message)
+                }
+            }
         });
 
         this.on("close",function() {
