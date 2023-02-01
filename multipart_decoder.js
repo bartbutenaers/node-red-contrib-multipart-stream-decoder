@@ -688,8 +688,10 @@ module.exports = function(RED) {
             // See https://github.com/bartbutenaers/node-red-contrib-multipart-stream-decoder/issues/4
             node.activeResponse.data.on('error', (err) => {
                 
-                
-                if (err.message === "aborted") {
+                // When the AbortController.abort is called, it seems that the err.message is "canceled".  
+                // So we need to handle that here, otherwise the Catch-node will receive a CanceledError.
+                // See https://discourse.nodered.org/t/announce-node-red-contrib-multipart-stream-decoder-version-1-0-0-beta/72365/24?u=bartbutenaers
+                if (err.message === "aborted" || err.message === "canceled") {
                     debugLog("Stream aborted event");
                     node.status({fill:"blue",shape:"dot",text:"stopped"});
                 }
