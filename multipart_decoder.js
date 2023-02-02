@@ -56,7 +56,7 @@ module.exports = function(RED) {
         if (n.tls) {
             var tlsNode = RED.nodes.getNode(n.tls);
         }
- 
+
         function sleep(milliseconds) {
             return new Promise(resolve => setTimeout(resolve, milliseconds));
         } 
@@ -377,6 +377,8 @@ module.exports = function(RED) {
             }
             
             if (node.abortRequestController) {
+                debugLog("Call abort on the abort request controller");
+
                 // Cancel the active request, which will interrupt the loop which is reading chunks from the response.
                 // This is e.g. useful when messages are inject quickly to switch to another stream.
                 // There will be a request to stop reading chunks, but before the reading is stopped a new
@@ -578,6 +580,8 @@ module.exports = function(RED) {
                 responseType: 'stream',
                 signal: node.abortRequestController.signal
             }
+            
+            debugLog("Starting a new stream (with an abortRequestController)");
 
             // Send the http request to the client, which should respond with a http stream
             try {
@@ -598,6 +602,9 @@ module.exports = function(RED) {
                         break;
                     case "digest":
                         const digestAuth = new AxiosDigestAuth.default({
+                            // Pass our own instance to the axios-digest-auth library, because that library contains an old axios version
+                            // as a dependency.  And that old axios library doesn't support a.o. the AbortController correctly.
+                            axios: axios,
                             username: node.credentials.user,
                             password: node.credentials.password
                         });
@@ -688,9 +695,7 @@ module.exports = function(RED) {
             // See https://github.com/bartbutenaers/node-red-contrib-multipart-stream-decoder/issues/4
             node.activeResponse.data.on('error', (err) => {
                 
-                // When the AbortController.abort is called, it seems that the err.message is "canceled".  
-                // So we need to handle that here, otherwise the Catch-node will receive a CanceledError.
-                // See https://discourse.nodered.org/t/announce-node-red-contrib-multipart-stream-decoder-version-1-0-0-beta/72365/24?u=bartbutenaers
+                
                 if (err.message === "aborted" || err.message === "canceled") {
                     debugLog("Stream aborted event");
                     node.status({fill:"blue",shape:"dot",text:"stopped"});
