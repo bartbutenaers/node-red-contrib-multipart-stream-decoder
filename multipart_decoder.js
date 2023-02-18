@@ -655,6 +655,13 @@ module.exports = function(RED) {
             msg.headers = node.activeResponse.headers;
             msg.responseUrl = node.activeResponse.config.url;
             msg.payload = [];
+            
+            // When the stream request was successfull, it might be that the chunks don't start arriving immediately.
+            // For example event streams from IP camera's only start sending events when an event has occured.
+            // To solve this, start counting the specified timeout from the moment the stream has started.
+            if (node.activeResponse.status == 200) {
+                node.timestampLastChunk = Date.now();
+            }
 
             node.activeResponse.data.on('end', () => {
                 debugLog("Stream end event");
