@@ -52,7 +52,7 @@
         </select>
     </div>
     <div class="form-row">
-        <label for="node-input-delay"><i class="fa fa-clock-o"></i> Delay</label>
+        <label for="node-input-delay"><i class="fa fa-barcode"></i> Delay</label>
         <input type="text" id="node-input-delay">
     </div>
     <div class="form-row">
@@ -69,6 +69,14 @@
             <option value="on"> On</option>
             <option value="off"> Off</option>
         </select>
+    </div>
+    <div class="form-row">
+        <label for="node-input-requestTimeout"><i class="fa fa-clock-o"></i> Req timeout</label>
+        <input type="text" id="node-input-requestTimeout">
+    </div>
+    <div class="form-row">
+        <label for="node-input-partTimeout"><i class="fa fa-clock-o"></i> Part timeout</label>
+        <input type="text" id="node-input-partTimeout">
     </div>
 </script>
 
@@ -104,6 +112,10 @@
         <li><code>stop</code> will stop the current stream if set to 'true' (which can be used if no new stream has to be started).</li>
         <li><code>delay</code> will be used to throttle the stream, if no delay has been specified in the node.</li>
     </ul></p>
+    <p><strong>Req timeout:</strong><br/>
+    When a number (of seconds) is specified, the initial request to the server will be stopped automatically if no response has arrived after this timerval.</p>
+    <p><strong>Part timeout:</strong><br/>
+    When a number (of seconds) is specified, the stream will be stopped automatically if no part has arrived anymore after this time interval.</p>
 </script>
 
 <script type="text/javascript">
@@ -119,7 +131,9 @@
             delay: {value:0, required: false, validate:function(value) { return !value || !isNaN(value); }},
             maximum: {value:1000000, required: true, validate:function(value) { return !value || !isNaN(value); }},
             blockSize: {value:1, required: false, validate:function(value) { return !value || !isNaN(value) || value<1; }},
-            enableLog: {value: "off"}
+            enableLog: {value: "off"},
+            requestTimeout: {value: 10},
+            partTimeout: {value: 10}
         },
         credentials: {
             user: {type:"text"},
