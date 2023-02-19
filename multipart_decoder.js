@@ -744,6 +744,12 @@ module.exports = function(RED) {
                     if(duration > node.partTimeout) {
                         debugLog("Timeout occured after " + duration + " msecs (now=" + now + " & timestampLastChunk=" + node.timestampLastChunk + ")");
                         node.timeoutOccured = true;
+                        
+                        node.error("Part timeout occured", msg);
+                
+                        msg.payload = "Part timeout occured"
+                        node.send([null, msg]);
+                
                         // Among others, the clearInterval will also happen in the stopCurrentResponseStream
                         stopCurrentResponseStream();
                     }
