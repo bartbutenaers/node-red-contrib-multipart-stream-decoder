@@ -35,15 +35,17 @@ module.exports = function(RED) {
     // EOL (end of the part headers area, and start of the part body)    
     // part body
     // ...
-    function MultiPartDecoder(n) {
-        RED.nodes.createNode(this,n);
-        this.delay              = n.delay;
-        this.url                = n.url;
-        this.authentication     = n.authentication;
-        this.ret                = n.ret || "txt";
-        this.maximum            = n.maximum;
-        this.blockSize          = n.blockSize || 1;
-        this.enableLog          = n.enableLog || "off";
+    function MultiPartDecoder(config) {
+        RED.nodes.createNode(this, config);
+        this.delay              = config.delay;
+        this.url                = config.url;
+        this.authentication     = config.authentication;
+        this.ret                = config.ret || "txt";
+        this.maximum            = config.maximum;
+        this.blockSize          = config.blockSize || 1;
+        this.enableLog          = config.enableLog || "off";
+        this.requestTimeout     = config.requestTimeout;
+        this.partTimeout        = config.partTimeout;
         this.activeResponse     = null;
         this.isPaused           = false;
         this.statusUpdated      = false;
@@ -53,8 +55,8 @@ module.exports = function(RED) {
 
         var node = this;
 
-        if (n.tls) {
-            var tlsNode = RED.nodes.getNode(n.tls);
+        if (config.tls) {
+            var tlsNode = RED.nodes.getNode(config.tls);
         }
 
         function sleep(milliseconds) {
@@ -388,7 +390,13 @@ module.exports = function(RED) {
                 node.abortRequestController.abort();
             }
             
-            node.status({fill:"blue",shape:"dot",text:"stopped"});
+            if (node.timeoutOccured) {
+                node.status({fill:"red",shape:"dot",text:"part timeout"});
+                node.timeoutOccured = false;
+            }
+            else {
+                node.status({fill:"blue",shape:"dot",text:"stopped"});
+            }
         }
 
         function sendOutputMessage(msg, boundary, contentLength) {
@@ -542,15 +550,7 @@ module.exports = function(RED) {
                     url = "http://"+url;
                 }
             }
- 
-            // When a timeout has been specified in the settings file, we should take that into account
-            if (RED.settings.httpRequestTimeout) { 
-                this.reqTimeout = parseInt(RED.settings.httpRequestTimeout) || 120000; 
-            }
-            else { 
-                this.reqTimeout = 120000; 
-            }
-            
+
             var fetchOptions = {};
             fetchOptions.method = 'GET';
             fetchOptions.headers = {};
@@ -579,6 +579,11 @@ module.exports = function(RED) {
                 insecureHTTPParser: true, // https://github.com/nodejs/node/issues/43798#issuecomment-1183584013
                 responseType: 'stream',
                 signal: node.abortRequestController.signal
+            }
+            
+            if (node.requestTimeout != null && node.requestTimeout > 0) {
+                debugLog("The request has been configured to stop after a timeout of "+ node.requestTimeout + " seconds");
+                requestOptions.timeout = node.requestTimeout;
             }
             
             debugLog("Starting a new stream (with an abortRequestController)");
@@ -728,20 +733,25 @@ module.exports = function(RED) {
                 }
             })
 
-            // Run a check every second
-            debugLog("Timeout check interval started");
-            node.timeoutCheck = setInterval(function() {
-                var now = Date.now();
-                var duration = now - node.timestampLastChunk;
-                
-                // If no chunk has arrived during the specified timeout period, then abort the stream
-                if(duration > node.reqTimeout) {
-                    debugLog("Timeout occured after " + duration + " msecs (now=" + now + " & timestampLastChunk=" + node.timestampLastChunk + ")");
-                    node.timeoutOccured = true;
-                    // Among others, the clearInterval will also happen in the stopCurrentResponseStream
-                    stopCurrentResponseStream();
-                }
-            }, 1000);
+            // Run a check every second when a part timout has been specified
+            if (node.partTimeout != null) {
+                debugLog("Timeout check interval started");
+                node.timeoutCheck = setInterval(function() {
+                    var now = Date.now();
+                    var duration = now - node.timestampLastChunk;
+                    
+                    // If no chunk has arrived during the specified timeout period, then abort the stream
+                    if(duration > node.partTimeout) {
+                        debugLog("Timeout occured after " + duration + " msecs (now=" + now + " & timestampLastChunk=" + node.timestampLastChunk + ")");
+                        node.timeoutOccured = true;
+                        // Among others, the clearInterval will also happen in the stopCurrentResponseStream
+                        stopCurrentResponseStream();
+                    }
+                }, 1000);
+            }
+            else {
+                debugLog("No timeout check interval started, because no timeout specified");
+            }
 
             /* TODO not sure anymore why this has been added
             if (payload) {
