@@ -581,7 +581,7 @@ module.exports = function(RED) {
                 signal: node.abortRequestController.signal
             }
             
-            if (node.requestTimeout != null && node.requestTimeout > 0) {
+            if (node.requestTimeout != null && node.requestTimeout !== "" && node.requestTimeout > 0) {
                 debugLog("The request has been configured to stop after a timeout of "+ node.requestTimeout + " seconds");
                 requestOptions.timeout = node.requestTimeout;
             }
@@ -734,7 +734,7 @@ module.exports = function(RED) {
             })
 
             // Run a check every second when a part timout has been specified
-            if (node.partTimeout != null) {
+            if (node.partTimeout != null && node.partTimeout !== "") {
                 debugLog("Timeout check interval started");
                 node.timeoutCheck = setInterval(function() {
                     var now = Date.now();
