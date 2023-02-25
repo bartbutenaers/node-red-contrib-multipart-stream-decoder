@@ -583,7 +583,7 @@ module.exports = function(RED) {
             
             if (node.requestTimeout != null && node.requestTimeout !== "" && node.requestTimeout > 0) {
                 debugLog("The request has been configured to stop after a timeout of "+ node.requestTimeout + " seconds");
-                requestOptions.timeout = node.requestTimeout;
+                requestOptions.timeout = node.requestTimeout * 1000;
             }
             
             debugLog("Starting a new stream (with an abortRequestController)");
@@ -741,7 +741,7 @@ module.exports = function(RED) {
                     var duration = now - node.timestampLastChunk;
                     
                     // If no chunk has arrived during the specified timeout period, then abort the stream
-                    if(duration > node.partTimeout) {
+                    if(duration > node.partTimeout*1000) {
                         debugLog("Timeout occured after " + duration + " msecs (now=" + now + " & timestampLastChunk=" + node.timestampLastChunk + ")");
                         node.timeoutOccured = true;
                         
