@@ -13,6 +13,8 @@ Run the following npm command in your Node-RED user directory (typically ~/.node
 npm install node-red-contrib-multipart-stream-decoder
 ```
 
+***CAUTION:*** Use minimal NodeJs version 15.0.0, otherwise you will get error *"AbortController is not defined"* when stopping the flow.
+
 ## Support my Node-RED developments
 Please buy my wife a coffee to keep her happy, while I am busy developing Node-RED stuff for you ...
 
