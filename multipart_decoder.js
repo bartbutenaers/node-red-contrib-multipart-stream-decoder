@@ -377,7 +377,12 @@ module.exports = function(RED) {
                 node.timeoutCheck = null;
                 debugLog("Timeout check interval stopped");
             }
-            
+
+            if (node.timeoutConnection) {
+                clearTimeout(node.timeoutConnection);
+                debugLog("Connection timeout timer stopped");
+            }
+
             if (node.abortRequestController) {
                 debugLog("Call abort on the abort request controller");
 
@@ -580,12 +585,22 @@ module.exports = function(RED) {
                 responseType: 'stream',
                 signal: node.abortRequestController.signal
             }
-            
+
             if (node.requestTimeout != null && node.requestTimeout !== "" && node.requestTimeout > 0) {
-                debugLog("The request has been configured to stop after a timeout of "+ node.requestTimeout + " seconds");
-                requestOptions.timeout = node.requestTimeout * 1000;
+                // Don't use the Axios timeout parameter, because it is response timeout not connection timeout.
+                // We don't need a response timeout, because that is already handled by the partTimeout option.
+                // We need a timeout when the connection cannot be opened within a specified interval.
+                // See 
+                //requestOptions.timeout = node.requestTimeout * 1000;
+
+                debugLog("The request timer has been started with a timeout of " + node.requestTimeout + " seconds");
+
+                node.timeoutConnection = setTimeout(function() {
+                    // Seems that no connection could be established within the specified time interval, so cleanup everything
+                    stopCurrentResponseStream();
+                }, node.timeoutConnection)
             }
-            
+
             debugLog("Starting a new stream (with an abortRequestController)");
 
             // Send the http request to the client, which should respond with a http stream
@@ -650,7 +665,14 @@ module.exports = function(RED) {
                 
                 return;
             }
-  
+            
+            // Seems a connection could be established within the specified time interval, so cleanup the connection timeout timer.
+            // Doesn't matter which status code we have received...
+            if (node.timeoutConnection) {
+                clearTimeout(node.timeoutConnection);
+                debugLog("Connection timeout interval stopped, because connection established");
+            }
+
             // Force NodeJs to return a Buffer (instead of a string): See https://github.com/nodejs/node/issues/6038
             //node.activeResponse.setEncoding(null);
             //delete node.activeResponse._readableState.decoder;
