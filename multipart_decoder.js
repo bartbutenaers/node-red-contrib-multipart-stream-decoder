@@ -65,7 +65,9 @@ module.exports = function(RED) {
 
         function debugLog(text) {
             if (node.enableLog === "on") {
-                console.log("MULTIPART STREAM : " + text);
+                let now = new Date();
+                let time = now.toISOString().substring(11, 23);
+                console.log("MULTIPART STREAM (" + time + "): " + text);
             }
         }
         
